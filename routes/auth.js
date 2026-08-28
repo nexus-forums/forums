@@ -49,10 +49,10 @@ router.post('/register', async (req, res) => {
 
         const token = jwt.sign({ userId: result.insertId, username }, JWT_SECRET, { expiresIn: '7d' });
 
-        res.cookie('token', token, {
+        res.cookie('token', token, 7 * 24 * 60 * 60 * 1000, {
             httpOnly: true,
-            maxAge: 7 * 24 * 60 * 60 * 1000,
-            sameSite: 'lax'
+            sameSite: 'lax',
+            path: '/'
         });
 
         res.status(201).json({
@@ -103,10 +103,10 @@ router.post('/login', async (req, res) => {
             { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
         );
 
-        res.cookie('token', token, {
+        res.cookie('token', token, 7 * 24 * 60 * 60 * 1000, {
             httpOnly: true,
-            maxAge: 7 * 24 * 60 * 60 * 1000,
-            sameSite: 'lax'
+            sameSite: 'lax',
+            path: '/'
         });
 
         res.json({
@@ -130,7 +130,7 @@ router.post('/login', async (req, res) => {
 
 // Logout
 router.post('/logout', (req, res) => {
-    res.clearCookie('token');
+    res.cookie('token', null, 0, { path: '/' });
     res.json({ success: true, message: 'Logged out' });
 });
 
