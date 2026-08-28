@@ -346,6 +346,9 @@ const threadPageHandler = async (req, res) => {
 
         if (!thread) return res.status(404).send(page('Not Found', '<div class="container"><div class="empty-state"><h3>Thread not found</h3></div></div>', req.user));
 
+        const threadTags = await query(`SELECT g.id, g.name, g.slug, g.color FROM tags g JOIN thread_tags tt ON tt.tag_id = g.id WHERE tt.thread_id = ? ORDER BY g.name`, [threadId]);
+        const threadTagPills = threadTags.map(g => `<a href="/tag/${g.id}/${g.slug}" class="tag-pill" style="background:${g.color}20;color:${g.color};border-color:${g.color}40">${escapeHtml(g.name)}</a>`).join('');
+
         const pageNum = Math.max(1, parseInt(req.query.page) || 1);
         const limit = 15;
         const offset = (pageNum - 1) * limit;
@@ -456,6 +459,7 @@ const threadPageHandler = async (req, res) => {
                     <span>👁 ${thread.views}</span>
                     <span>💬 ${totalReplies}</span>
                 </div>
+                ${threadTagPills ? `<div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.75rem">${threadTagPills}</div>` : ''}
             </div>
             <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;margin-bottom:1.5rem">
                 ${posts}
@@ -488,6 +492,95 @@ const threadPageHandler = async (req, res) => {
 };
 app.get('/t/:id', threadPageHandler);
 app.get('/t/:id/:slug', threadPageHandler);
+
+// Tag page — threads with a given tag
+app.get('/tag/:id', async (req, res) => {
+    const tagId = parseInt(req.params.id);
+    if (isNaN(tagId)) return res.status(404).send('Not Found');
+    const [tag] = await query('SELECT slug FROM tags WHERE id = ?', [tagId]);
+    if (!tag) return res.status(404).send('Not Found');
+    res.redirect(`/tag/${tagId}/${tag.slug}`);
+});
+app.get('/tag/:id/:slug', async (req, res) => {
+    try {
+        const tagId = parseInt(req.params.id);
+        if (isNaN(tagId)) return res.status(404).send('Not Found');
+        const [tag] = await query('SELECT * FROM tags WHERE id = ?', [tagId]);
+        if (!tag) return res.status(404).send(page('Not Found', '<div class="container"><div class="empty-state"><h3>Tag not found</h3></div></div>', req.user));
+
+        const pageNum = Math.max(1, parseInt(req.query.page) || 1);
+        const limit = 20;
+        const offset = (pageNum - 1) * limit;
+
+        const [threads, countResult] = await Promise.all([
+            query(`SELECT t.*, c.name as category_name, c.slug as category_slug, c.color as category_color,
+                u.username, u.display_name, u.avatar
+                FROM threads t
+                JOIN thread_tags tt ON tt.thread_id = t.id
+                JOIN categories c ON t.category_id = c.id JOIN users u ON t.user_id = u.id
+                WHERE tt.tag_id = ?
+                ORDER BY t.is_pinned DESC, t.last_post_at DESC LIMIT ? OFFSET ?`, [tagId, limit, offset]),
+            query('SELECT COUNT(*) as total FROM thread_tags WHERE tag_id = ?', [tagId])
+        ]);
+        const total = countResult[0].total;
+        const pages = Math.ceil(total / limit);
+
+        const threadList = threads.map(t => `
+            <a href="/t/${t.id}/${t.slug}" class="thread-card">
+                <div class="avatar-wrap"><img src="${t.avatar || generateAvatar(t.username || t.display_name)}" alt="${t.username}" width="48" height="48"></div>
+                <div class="thread-content">
+                    <h4>${t.is_pinned ? '📌 ' : ''}${escapeHtml(t.title)}</h4>
+                    <p class="excerpt">${escapeHtml(t.content.substring(0, 140))}${t.content.length > 140 ? '...' : ''}</p>
+                    <div class="thread-meta">
+                        <span style="color:${t.category_color}">● ${escapeHtml(t.category_name)}</span>
+                        <span>by ${escapeHtml(t.display_name || t.username)}</span>
+                        <span>${timeAgo(t.last_post_at)}</span>
+                    </div>
+                </div>
+                <div class="thread-stats">
+                    <div class="stat"><span class="stat-value">${t.reply_count}</span><span class="stat-label">replies</span></div>
+                    <div class="stat"><span class="stat-value">${t.views}</span><span class="stat-label">views</span></div>
+                    <div class="stat"><span class="stat-value">${t.like_count}</span><span class="stat-label">likes</span></div>
+                </div>
+            </a>
+        `).join('') || '<div class="empty-state"><h3>No threads with this tag yet</h3></div>';
+
+        let pagination = '';
+        if (pages > 1) {
+            pagination = '<div class="pagination">';
+            if (pageNum > 1) pagination += `<a href="/tag/${tag.id}/${tag.slug}?page=${pageNum-1}">←</a>`;
+            for (let i = 1; i <= pages; i++) {
+                if (i === pageNum) pagination += `<span class="current">${i}</span>`;
+                else if (i === 1 || i === pages || Math.abs(i - pageNum) <= 2) pagination += `<a href="/tag/${tag.id}/${tag.slug}?page=${i}">${i}</a>`;
+                else if (Math.abs(i - pageNum) === 3) pagination += `<span class="ellipsis">...</span>`;
+            }
+            if (pageNum < pages) pagination += `<a href="/tag/${tag.id}/${tag.slug}?page=${pageNum+1}">→</a>`;
+            pagination += '</div>';
+        }
+
+        const body = `
+        <div class="container" style="padding-top:2rem">
+            <div class="quick-bar">
+                <div class="breadcrumb">
+                    <a href="/">Home</a> <span>/</span>
+                    <span style="color:var(--text-primary);font-weight:600">Tag</span>
+                </div>
+                ${req.user ? '<a href="/new" class="btn btn-ghost btn-sm">New Discussion</a>' : ''}
+            </div>
+            <div class="thread-header">
+                <h1 style="color:${tag.color}">${escapeHtml(tag.name)}</h1>
+                ${tag.description ? `<p style="color:var(--text-secondary);margin-top:0.5rem">${escapeHtml(tag.description)}</p>` : ''}
+                <div class="thread-info"><span>${total} thread${total === 1 ? '' : 's'}</span></div>
+            </div>
+            <div class="thread-list">${threadList}</div>
+            ${pagination}
+        </div>`;
+        res.send(page(`#${tag.name} — Forum`, body, req.user));
+    } catch (error) {
+        console.error('Tag error:', error);
+        res.status(500).send('Server Error');
+    }
+});
 
 // New thread page
 app.get('/new', authenticate, async (req, res) => {
