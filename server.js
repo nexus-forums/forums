@@ -781,8 +781,8 @@ function authPage(title, subtitle, formHtml, isRegister) {
     visual += '</div></div>';
 
     var html = visual;
+    html += '<a href="/" class="auth-home-btn">\u2190 Home</a>';
     html += '<div class="auth-form-wrap"><div class="auth-form">';
-    html += '<a href="/" class="auth-back-link">\u2190 Back to Home</a>';
     html += '<h2>' + title + '</h2><p class="subtitle">' + subtitle + '</p>';
     html += '<div id="authAlert"></div>' + formHtml;
     html += '<div class="form-footer">';
@@ -793,7 +793,7 @@ function authPage(title, subtitle, formHtml, isRegister) {
     }
     html += '</div></div></div>';
 
-    return page(title, html, null, '<style>.navbar{display:none}.site-footer{display:none}.main-content{min-height:100vh}.auth-back-link{display:inline-flex;align-items:center;gap:0.35rem;font-size:0.85rem;font-weight:600;color:var(--text-muted);text-decoration:none;margin-bottom:1rem}.auth-back-link:hover{color:var(--accent)}</style>');
+    return page(title, html, null, '<style>.navbar{display:none}.site-footer{display:none}.main-content{min-height:100vh}.auth-home-btn{position:fixed;top:1.25rem;left:1.5rem;z-index:100;display:inline-flex;align-items:center;gap:0.45rem;padding:0.55rem 1rem;border-radius:999px;background:var(--bg-elevated,rgba(255,255,255,0.06));border:1px solid var(--border,rgba(255,255,255,0.12));color:var(--text-primary);font-size:0.875rem;font-weight:600;text-decoration:none;box-shadow:var(--shadow-md,0 4px 12px rgba(0,0,0,0.25));transition:border-color .15s,color .15s,transform .15s}.auth-home-btn:hover{border-color:var(--accent,#6366f1);color:var(--accent,#6366f1);transform:translateY(-1px)}</style>');
 }
 
 app.get('/login', async (req, res) => {
