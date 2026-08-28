@@ -782,6 +782,7 @@ function authPage(title, subtitle, formHtml, isRegister) {
 
     var html = visual;
     html += '<div class="auth-form-wrap"><div class="auth-form">';
+    html += '<a href="/" class="auth-back-link">\u2190 Back to Home</a>';
     html += '<h2>' + title + '</h2><p class="subtitle">' + subtitle + '</p>';
     html += '<div id="authAlert"></div>' + formHtml;
     html += '<div class="form-footer">';
@@ -792,7 +793,7 @@ function authPage(title, subtitle, formHtml, isRegister) {
     }
     html += '</div></div></div>';
 
-    return page(title, html, null, '<style>.navbar{display:none}.site-footer{display:none}.main-content{min-height:100vh}</style>');
+    return page(title, html, null, '<style>.navbar{display:none}.site-footer{display:none}.main-content{min-height:100vh}.auth-back-link{display:inline-flex;align-items:center;gap:0.35rem;font-size:0.85rem;font-weight:600;color:var(--text-muted);text-decoration:none;margin-bottom:1rem}.auth-back-link:hover{color:var(--accent)}</style>');
 }
 
 app.get('/login', async (req, res) => {
