@@ -1085,6 +1085,221 @@ app.get('/settings', authenticate, async (req, res) => {
     }
 });
 
+// Messages page (conversation list)
+app.get('/messages', authenticate, async (req, res) => {
+    try {
+        if (!req.user) return res.redirect('/login');
+
+        const convos = await query(`
+            SELECT cp.conversation_id, c.subject, c.updated_at,
+                (SELECT COUNT(*) FROM conversation_participants cp2 WHERE cp2.conversation_id = c.id AND cp2.user_id != ?) as others,
+                (SELECT u.username FROM conversation_participants cp2 JOIN users u ON u.id = cp2.user_id WHERE cp2.conversation_id = c.id AND cp2.user_id != ? LIMIT 1) as other_username,
+                (SELECT u.display_name FROM conversation_participants cp2 JOIN users u ON u.id = cp2.user_id WHERE cp2.conversation_id = c.id AND cp2.user_id != ? LIMIT 1) as other_name,
+                (SELECT u.avatar FROM conversation_participants cp2 JOIN users u ON u.id = cp2.user_id WHERE cp2.conversation_id = c.id AND cp2.user_id != ? LIMIT 1) as other_avatar,
+                (SELECT m.content FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1) as last_message,
+                (SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1) as last_at,
+                (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.user_id != ? AND m.created_at > COALESCE(cp.last_read_at, '1970-01-01')) as unread
+            FROM conversation_participants cp
+            JOIN conversations c ON c.id = cp.conversation_id
+            WHERE cp.user_id = ?
+            ORDER BY c.updated_at DESC`,
+            [req.user.id, req.user.id, req.user.id, req.user.id, req.user.id, req.user.id]);
+
+        const convoList = convos.map(cv => `
+            <a href="/messages/${cv.conversation_id}" class="thread-card" style="position:relative">
+                <div class="avatar-wrap"><img src="${cv.other_avatar || generateAvatar(cv.other_username)}" alt="${cv.other_username}" width="48" height="48"></div>
+                <div class="thread-content">
+                    <h4>${escapeHtml(cv.other_name || cv.other_username)}${cv.subject ? ` — ${escapeHtml(cv.subject)}` : ''}</h4>
+                    <p class="excerpt">${escapeHtml((cv.last_message || '').substring(0, 120))}${(cv.last_message || '').length > 120 ? '...' : ''}</p>
+                    <div class="thread-meta"><span>${cv.last_at ? timeAgo(cv.last_at) : ''}</span></div>
+                </div>
+                ${cv.unread > 0 ? `<span style="background:var(--accent);color:#fff;border-radius:999px;min-width:1.5rem;height:1.5rem;display:inline-flex;align-items:center;justify-content:center;font-size:0.75rem;font-weight:700;padding:0 0.4rem">${cv.unread}</span>` : ''}
+            </a>
+        `).join('');
+
+        const users = await query('SELECT username FROM users WHERE is_banned = FALSE AND id != ? ORDER BY username', [req.user.id]);
+        const userOptions = users.map(u => `<option value="${escapeHtml(u.username)}"></option>`).join('');
+
+        const body = `
+        <div class="container" style="padding-top:2rem;max-width:800px">
+            <div class="section-header">
+                <h2>✉️ Messages</h2>
+            </div>
+            <div class="card" style="padding:1.5rem;margin-bottom:1.5rem">
+                <h3 style="margin-bottom:1rem">New Message</h3>
+                <form id="newMessageForm">
+                    <div class="form-group">
+                        <label class="form-label" for="msgTo">To (username)</label>
+                        <input class="form-input" id="msgTo" list="userList" type="text" required style="width:100%">
+                        <datalist id="userList">${userOptions}</datalist>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="msgContent">Message</label>
+                        <textarea class="form-textarea" id="msgContent" rows="4" required placeholder="Write your message..."></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Send Message</button>
+                </form>
+            </div>
+            <div class="thread-list">${convoList || '<div class="empty-state"><h3>No messages yet</h3><p>Start a conversation above.</p></div>'}</div>
+        </div>
+        <script>
+        document.getElementById('newMessageForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            try {
+                const r = await fetch('/api/messages', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
+                    to: document.getElementById('msgTo').value.trim(),
+                    content: document.getElementById('msgContent').value
+                })});
+                const d = await r.json();
+                if (d.success) location.href = '/messages/' + d.conversation_id;
+                else showToast(d.error || 'Send failed', 'error');
+            } catch (err) { showToast('Send failed', 'error'); }
+        });
+        </script>`;
+
+        res.header('Content-Type', 'text/html');
+        res.send(page('Messages', body, req.user));
+    } catch (error) {
+        console.error('Messages error:', error);
+        res.status(500).send('Server Error');
+    }
+});
+
+// Single conversation
+app.get('/messages/:id', authenticate, async (req, res) => {
+    try {
+        if (!req.user) return res.redirect('/login');
+        const cid = parseInt(req.params.id);
+        if (isNaN(cid)) return res.status(404).send('Not Found');
+
+        const [part] = await query('SELECT last_read_at FROM conversation_participants WHERE conversation_id = ? AND user_id = ?', [cid, req.user.id]);
+        if (!part) return res.status(404).send(page('Not Found', '<div class="container"><div class="empty-state"><h3>Conversation not found</h3></div></div>', req.user));
+
+        const [convo] = await query('SELECT subject FROM conversations WHERE id = ?', [cid]);
+        const msgs = await query(`
+            SELECT m.*, u.username, u.display_name, u.avatar
+            FROM messages m JOIN users u ON u.id = m.user_id
+            WHERE m.conversation_id = ? ORDER BY m.created_at ASC`, [cid]);
+
+        await query('UPDATE conversation_participants SET last_read_at = NOW() WHERE conversation_id = ? AND user_id = ?', [cid, req.user.id]);
+
+        const other = await query(`
+            SELECT u.username, u.display_name FROM conversation_participants cp JOIN users u ON u.id = cp.user_id
+            WHERE cp.conversation_id = ? AND cp.user_id != ? LIMIT 1`, [cid, req.user.id]);
+        const otherName = other[0] ? (other[0].display_name || other[0].username) : 'Unknown';
+
+        const msgList = msgs.map(m => `
+            <div class="post" style="${m.user_id === req.user.id ? 'border-left:3px solid var(--accent)' : ''}">
+                <div class="post-header">
+                    <div style="display:flex;align-items:center;gap:0.5rem">
+                        <a href="/u/${m.username}" style="font-weight:600;color:var(--text-primary)">${escapeHtml(m.display_name || m.username)}</a>
+                        <time>${timeAgo(m.created_at)}</time>
+                    </div>
+                </div>
+                <div class="post-content" style="white-space:pre-wrap">${escapeHtml(m.content)}</div>
+            </div>
+        `).join('');
+
+        const body = `
+        <div class="container" style="padding-top:2rem;max-width:800px">
+            <div class="quick-bar">
+                <div class="breadcrumb">
+                    <a href="/messages">Messages</a> <span>/</span>
+                    <span style="color:var(--text-primary);font-weight:600">${escapeHtml(otherName)}</span>
+                </div>
+            </div>
+            <div class="thread-header"><h1>Chat with ${escapeHtml(otherName)}</h1>${convo && convo.subject ? `<div class="thread-info"><span>${escapeHtml(convo.subject)}</span></div>` : ''}</div>
+            <div style="display:flex;flex-direction:column;gap:0.75rem;margin-bottom:1.5rem">${msgList}</div>
+            <div class="reply-box">
+                <form id="replyMessageForm">
+                    <textarea id="replyMsgContent" class="form-textarea" rows="3" placeholder="Write a message..." required></textarea>
+                    <div style="margin-top:0.75rem;text-align:right"><button type="submit" class="btn btn-primary">Send</button></div>
+                </form>
+            </div>
+        </div>
+        <script>
+        document.getElementById('replyMessageForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            try {
+                const r = await fetch('/api/messages/${cid}', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
+                    content: document.getElementById('replyMsgContent').value
+                })});
+                const d = await r.json();
+                if (d.success) location.reload();
+                else showToast(d.error || 'Send failed', 'error');
+            } catch (err) { showToast('Send failed', 'error'); }
+        });
+        </script>`;
+
+        res.header('Content-Type', 'text/html');
+        res.send(page('Messages', body, req.user));
+    } catch (error) {
+        console.error('Conversation error:', error);
+        res.status(500).send('Server Error');
+    }
+});
+
+// API: send a new message (starts or continues a conversation)
+app.post('/api/messages', authenticate, async (req, res) => {
+    try {
+        if (!req.user) return res.status(401).json({ success: false, error: 'Authentication required' });
+        const { to, content, subject } = await req.json();
+        if (!to || !content || !content.trim()) return res.status(400).json({ success: false, error: 'Recipient and message are required' });
+
+        const [recipient] = await query('SELECT id FROM users WHERE username = ? AND is_banned = FALSE', [to]);
+        if (!recipient) return res.status(404).json({ success: false, error: 'User not found' });
+        if (recipient.id === req.user.id) return res.status(400).json({ success: false, error: 'You cannot message yourself' });
+
+        // Find existing 1:1 conversation between the two users
+        const existing = await query(`
+            SELECT c.id FROM conversations c
+            JOIN conversation_participants a ON a.conversation_id = c.id AND a.user_id = ?
+            JOIN conversation_participants b ON b.conversation_id = c.id AND b.user_id = ?
+            WHERE (SELECT COUNT(*) FROM conversation_participants p WHERE p.conversation_id = c.id) = 2
+            LIMIT 1`, [req.user.id, recipient.id]);
+
+        let cid;
+        if (existing.length > 0) {
+            cid = existing[0].id;
+        } else {
+            const result = await query('INSERT INTO conversations (subject) VALUES (?)', [subject || null]);
+            cid = result.insertId;
+            await query('INSERT INTO conversation_participants (conversation_id, user_id) VALUES (?, ?), (?, ?)', [cid, req.user.id, cid, recipient.id]);
+        }
+
+        await query('INSERT INTO messages (conversation_id, user_id, content) VALUES (?, ?, ?)', [cid, req.user.id, content.trim()]);
+        await query('UPDATE conversations SET updated_at = NOW() WHERE id = ?', [cid]);
+        await query('UPDATE conversation_participants SET last_read_at = NOW() WHERE conversation_id = ? AND user_id = ?', [cid, req.user.id]);
+
+        res.json({ success: true, conversation_id: cid });
+    } catch (error) {
+        console.error('Send message error:', error);
+        res.status(500).json({ success: false, error: 'Send failed' });
+    }
+});
+
+// API: reply within an existing conversation
+app.post('/api/messages/:id', authenticate, async (req, res) => {
+    try {
+        if (!req.user) return res.status(401).json({ success: false, error: 'Authentication required' });
+        const cid = parseInt(req.params.id);
+        const { content } = await req.json();
+        if (!content || !content.trim()) return res.status(400).json({ success: false, error: 'Message is required' });
+
+        const [part] = await query('SELECT user_id FROM conversation_participants WHERE conversation_id = ? AND user_id = ?', [cid, req.user.id]);
+        if (!part) return res.status(404).json({ success: false, error: 'Conversation not found' });
+
+        await query('INSERT INTO messages (conversation_id, user_id, content) VALUES (?, ?, ?)', [cid, req.user.id, content.trim()]);
+        await query('UPDATE conversations SET updated_at = NOW() WHERE id = ?', [cid]);
+        await query('UPDATE conversation_participants SET last_read_at = NOW() WHERE conversation_id = ? AND user_id = ?', [cid, req.user.id]);
+
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Reply error:', error);
+        res.status(500).json({ success: false, error: 'Send failed' });
+    }
+});
+
 app.get('/notifications', authenticate, async (req, res) => {
     if (!req.user) return res.redirect('/login?return=/notifications');
     const notifications = await query('SELECT n.*, u.username, u.avatar FROM notifications n LEFT JOIN users u ON n.actor_id = u.id WHERE n.user_id = ? ORDER BY n.created_at DESC LIMIT 50', [req.user.id]);
