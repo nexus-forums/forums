@@ -1,4 +1,4 @@
-const { escapeHtml } = require('./helpers');
+const { escapeHtml, generateAvatar } = require('./helpers');
 
 function page(title, body, user = null, extraHead = '') {
     const isAdmin = user?.role === 'admin';
@@ -16,7 +16,7 @@ function page(title, body, user = null, extraHead = '') {
     <link rel="stylesheet" href="/css/style.css">
     ${extraHead}
 </head>
-<body>
+<body${user ? ` data-user="${user.id}" data-username="${escapeHtml(user.username)}"` : ''}>
     <div id="app">
         <nav class="navbar">
             <div class="nav-brand">
@@ -50,7 +50,7 @@ function page(title, body, user = null, extraHead = '') {
                 </a>
                 <div class="user-menu">
                     <a href="/u/${user.username}" class="user-avatar">
-                        <img src="${user.avatar || '/img/default-avatar.svg'}" alt="${user.username}" width="32" height="32">
+                        <img src="${user.avatar || generateAvatar(user.username)}" alt="${user.username}" width="32" height="32">
                         <span class="user-name">${escapeHtml(user.display_name || user.username)}</span>
                         <span class="user-rep">${user.reputation || 0}</span>
                     </a>
