@@ -480,6 +480,13 @@ const threadPageHandler = async (req, res) => {
                     </div>
                     <div class="form-group">
                         <label class="form-label" for="editModalContent">Content (Markdown)</label>
+                        <div class="editor-toolbar">
+                            <button type="button" data-action="bold">B</button>
+                            <button type="button" data-action="italic">I</button>
+                            <button type="button" data-action="link">🔗</button>
+                            <button type="button" data-action="code">&lt;/&gt;</button>
+                            <button type="button" data-action="quote">"</button>
+                        </div>
                         <textarea class="form-textarea" id="editModalContent" rows="8" style="width:100%"></textarea>
                     </div>
                     <div style="display:flex;justify-content:flex-end;gap:0.5rem">
