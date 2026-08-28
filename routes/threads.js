@@ -260,6 +260,91 @@ router.patch('/api/threads/:id/lock', requireRole(['moderator', 'admin']), async
 });
 
 // Mark as solution (thread author or mod/admin)
+// Edit thread (title/content) — author or mod
+router.patch('/api/threads/:id', requireAuth, async (req, res) => {
+    try {
+        const [thread] = await query('SELECT user_id FROM threads WHERE id = ?', [req.params.id]);
+        if (!thread) return res.status(404).json({ success: false, error: 'Thread not found' });
+        if (thread.user_id !== req.user.id && !['moderator', 'admin'].includes(req.user.role)) {
+            return res.status(403).json({ success: false, error: 'Not allowed' });
+        }
+
+        const { title, content } = await req.json();
+        const updates = [];
+        const values = [];
+        if (title !== undefined) {
+            if (!title.trim() || title.trim().length < 5 || title.trim().length > 255) {
+                return res.status(400).json({ success: false, error: 'Title must be 5-255 characters' });
+            }
+            updates.push('title = ?');
+            values.push(title.trim());
+        }
+        if (content !== undefined) {
+            if (!content.trim() || content.trim().length < 10) {
+                return res.status(400).json({ success: false, error: 'Content must be at least 10 characters' });
+            }
+            updates.push('content = ?');
+            values.push(content.trim());
+        }
+        if (updates.length === 0) return res.status(400).json({ success: false, error: 'Nothing to update' });
+        updates.push('edited_at = NOW()');
+        values.push(req.params.id);
+        await query(`UPDATE threads SET ${updates.join(', ')} WHERE id = ?`, values);
+        res.json({ success: true, message: 'Thread updated' });
+    } catch (error) {
+        console.error('Edit thread error:', error);
+        res.status(500).json({ success: false, error: 'Update failed' });
+    }
+});
+
+// Edit reply content — author or mod
+router.patch('/api/replies/:id', requireAuth, async (req, res) => {
+    try {
+        const [reply] = await query('SELECT user_id FROM replies WHERE id = ?', [req.params.id]);
+        if (!reply) return res.status(404).json({ success: false, error: 'Reply not found' });
+        if (reply.user_id !== req.user.id && !['moderator', 'admin'].includes(req.user.role)) {
+            return res.status(403).json({ success: false, error: 'Not allowed' });
+        }
+
+        const { content } = await req.json();
+        if (!content || !content.trim() || content.trim().length < 2) {
+            return res.status(400).json({ success: false, error: 'Content must be at least 2 characters' });
+        }
+        await query('UPDATE replies SET content = ?, edited_at = NOW() WHERE id = ?', [content.trim(), req.params.id]);
+        res.json({ success: true, message: 'Reply updated' });
+    } catch (error) {
+        console.error('Edit reply error:', error);
+        res.status(500).json({ success: false, error: 'Update failed' });
+    }
+});
+
+// Get raw content for the edit modal
+router.get('/api/threads/:id/raw', requireAuth, async (req, res) => {
+    try {
+        const [thread] = await query('SELECT user_id, title, content FROM threads WHERE id = ?', [req.params.id]);
+        if (!thread) return res.status(404).json({ success: false });
+        if (thread.user_id !== req.user.id && !['moderator', 'admin'].includes(req.user.role)) {
+            return res.status(403).json({ success: false });
+        }
+        res.json({ success: true, title: thread.title, content: thread.content });
+    } catch (error) {
+        res.status(500).json({ success: false });
+    }
+});
+
+router.get('/api/replies/:id/raw', requireAuth, async (req, res) => {
+    try {
+        const [reply] = await query('SELECT user_id, content FROM replies WHERE id = ?', [req.params.id]);
+        if (!reply) return res.status(404).json({ success: false });
+        if (reply.user_id !== req.user.id && !['moderator', 'admin'].includes(req.user.role)) {
+            return res.status(403).json({ success: false });
+        }
+        res.json({ success: true, content: reply.content });
+    } catch (error) {
+        res.status(500).json({ success: false });
+    }
+});
+
 router.patch('/api/replies/:id/solution', requireAuth, async (req, res) => {
     try {
         const replies = await query('SELECT thread_id FROM replies WHERE id = ?', [req.params.id]);

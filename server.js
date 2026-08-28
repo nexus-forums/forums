@@ -374,7 +374,7 @@ const threadPageHandler = async (req, res) => {
                 <button onclick="fetch('/api/threads/${thread.id}/lock',{method:'PATCH'}).then(()=>location.reload())" title="${thread.is_locked ? 'Unlock' : 'Lock'}">🔒</button>
                 <button onclick="fetch('/api/threads/${thread.id}/pin',{method:'PATCH'}).then(()=>location.reload())" title="${thread.is_pinned ? 'Unpin' : 'Pin'}">📌</button>
             ` : '';
-            const editActions = isAuthor ? `<button onclick="alert('Edit coming soon')">✏️</button>` : '';
+            const editActions = (isAuthor || isMod) ? `<button onclick="openEditModal('${isThread ? 'thread' : 'reply'}', ${p.id})" title="Edit">✏️</button>` : '';
             return `
             <div class="post ${isThread ? 'thread-post' : ''}">
                 <div class="post-author">
@@ -391,6 +391,7 @@ const threadPageHandler = async (req, res) => {
                     <div class="post-header">
                         <div style="display:flex;align-items:center;gap:0.5rem">
                             <time>${timeAgo(p.created_at)}</time>
+                            ${p.edited_at ? '<span style="color:var(--text-muted);font-size:0.75rem">(edited)</span>' : ''}
                             ${solutionBadge}
                             ${isThread && thread.is_locked ? '<span style="background:var(--danger);color:white;padding:0.15rem 0.5rem;border-radius:var(--radius-sm);font-size:0.7rem;font-weight:700">🔒 Locked</span>' : ''}
                         </div>
@@ -467,7 +468,58 @@ const threadPageHandler = async (req, res) => {
             ${pagination}
             ${replyForm}
         </div>
+        <div id="editModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+            <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);width:100%;max-width:640px;padding:1.5rem">
+                <h3 style="margin-bottom:1rem">Edit Post</h3>
+                <form id="editModalForm">
+                    <input type="hidden" id="editModalType">
+                    <input type="hidden" id="editModalId">
+                    <div class="form-group" id="editModalTitleRow">
+                        <label class="form-label" for="editModalTitle">Title</label>
+                        <input class="form-input" id="editModalTitle" type="text" maxlength="255" style="width:100%">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="editModalContent">Content (Markdown)</label>
+                        <textarea class="form-textarea" id="editModalContent" rows="8" style="width:100%"></textarea>
+                    </div>
+                    <div style="display:flex;justify-content:flex-end;gap:0.5rem">
+                        <button type="button" class="btn btn-ghost" onclick="closeEditModal()">Cancel</button>
+                        <button type="submit" class="btn btn-primary">Save Changes</button>
+                    </div>
+                </form>
+            </div>
+        </div>
         <script>
+        function openEditModal(type, id) {
+            fetch('/api/' + (type === 'thread' ? 'threads' : 'replies') + '/' + id + '/raw')
+                .then(r => r.json())
+                .then(d => {
+                    if (!d.success) return showToast('Cannot load post', 'error');
+                    document.getElementById('editModalType').value = type;
+                    document.getElementById('editModalId').value = id;
+                    document.getElementById('editModalTitle').value = d.title || '';
+                    document.getElementById('editModalTitleRow').style.display = type === 'thread' ? '' : 'none';
+                    document.getElementById('editModalContent').value = d.content;
+                    document.getElementById('editModal').style.display = 'flex';
+                })
+                .catch(() => showToast('Cannot load post', 'error'));
+        }
+        function closeEditModal() { document.getElementById('editModal').style.display = 'none'; }
+        document.getElementById('editModalForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const type = document.getElementById('editModalType').value;
+            const id = document.getElementById('editModalId').value;
+            const payload = { content: document.getElementById('editModalContent').value };
+            if (type === 'thread') payload.title = document.getElementById('editModalTitle').value;
+            try {
+                const r = await fetch('/api/' + (type === 'thread' ? 'threads' : 'replies') + '/' + id, {
+                    method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
+                });
+                const d = await r.json();
+                if (d.success) location.reload();
+                else showToast(d.error || 'Edit failed', 'error');
+            } catch (err) { showToast('Edit failed', 'error'); }
+        });
         async function submitReply(threadId) {
             const content = document.getElementById('replyContent').value;
             if (!content.trim()) return showToast('Reply cannot be empty', 'error');
