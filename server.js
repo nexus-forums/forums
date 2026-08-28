@@ -146,7 +146,7 @@ app.get('/', async (req, res) => {
                     ${t.is_pinned ? '<span class="pinned-badge">📌</span>' : ''}
                 </div>
                 <div class="thread-content">
-                    <h4><a href="/t/${t.id}/${t.slug}">${escapeHtml(t.title)}</a></h4>
+                    <h4>${escapeHtml(t.title)}</h4>
                     <p class="excerpt">${escapeHtml(t.content.substring(0, 140))}${t.content.length > 140 ? '...' : ''}</p>
                     <div class="thread-meta">
                         <span style="color:${t.category_color}">● ${escapeHtml(t.category_name)}</span>
@@ -270,7 +270,7 @@ app.get('/c/:slug', async (req, res) => {
                     ${t.is_pinned ? '<span class="pinned-badge">📌</span>' : ''}
                 </div>
                 <div class="thread-content">
-                    <h4><a href="/t/${t.id}/${t.slug}">${escapeHtml(t.title)}</a></h4>
+                    <h4>${escapeHtml(t.title)}</h4>
                     <p class="excerpt">${escapeHtml(t.content.substring(0, 140))}${t.content.length > 140 ? '...' : ''}</p>
                     <div class="thread-meta">
                         <span>by ${escapeHtml(t.display_name || t.username)}</span>
@@ -573,7 +573,7 @@ app.get('/u/:username', async (req, res) => {
         const threadList = recentThreads.map(t => `
             <a href="/t/${t.id}/${t.slug}" class="thread-card" style="padding:1rem">
                 <div class="thread-content">
-                    <h4><a href="/t/${t.id}/${t.slug}">${escapeHtml(t.title)}</a></h4>
+                    <h4>${escapeHtml(t.title)}</h4>
                     <div class="thread-meta">
                         <span style="color:${t.category_color}">● ${escapeHtml(t.category_name)}</span>
                         <span>${timeAgo(t.created_at)}</span>
@@ -721,7 +721,7 @@ app.get('/latest', async (req, res) => {
             <a href="/t/${t.id}/${t.slug}" class="thread-card">
                 <div class="avatar-wrap"><img src="${t.avatar || generateAvatar(t.username || t.display_name)}" alt="${t.username}" width="48" height="48"></div>
                 <div class="thread-content">
-                    <h4><a href="/t/${t.id}/${t.slug}">${escapeHtml(t.title)}</a></h4>
+                    <h4>${escapeHtml(t.title)}</h4>
                     <p class="excerpt">${escapeHtml(t.content.substring(0, 140))}${t.content.length > 140 ? '...' : ''}</p>
                     <div class="thread-meta">
                         <span style="color:${t.category_color}">● ${escapeHtml(t.category_name)}</span>
