@@ -979,7 +979,7 @@ app.get('/settings', authenticate, async (req, res) => {
                 <h3 style="margin-bottom:1rem">Profile</h3>
                 <form id="profileForm">
                     <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem">
-                        <img id="avatarPreview" src="${me.avatar || generateAvatar(me.username)}" alt="avatar" width="72" height="72" style="border-radius:50%;border:2px solid var(--border)">
+                        <img id="avatarPreview" src="${me.avatar || generateAvatar(me.username)}" onerror="this.onerror=null;this.src='${generateAvatar(me.username)}'" alt="avatar" width="72" height="72" style="border-radius:50%;border:2px solid var(--border)">
                         <div style="flex:1">
                             <label class="form-label" for="avatarInput">Avatar URL (leave empty for default)</label>
                             <input class="form-input" id="avatarInput" type="text" value="${me.avatar && !me.avatar.startsWith('data:') ? escapeHtml(me.avatar) : ''}" placeholder="https://example.com/avatar.png" style="width:100%">

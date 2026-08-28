@@ -30,6 +30,23 @@
         });
     }
 
+    // Global avatar fallback: if an avatar image fails to load, swap in the
+    // deterministic SVG avatar derived from the img's alt text (username).
+    document.addEventListener('error', (e) => {
+        const img = e.target;
+        if (img.tagName !== 'IMG' || img.dataset.fallbackApplied) return;
+        img.dataset.fallbackApplied = '1';
+        const name = img.getAttribute('alt') || 'user';
+        // generateAvatar is injected server-side on pages that use it
+        if (typeof window.generateAvatar === 'function') {
+            img.src = window.generateAvatar(name);
+        } else {
+            img.src = 'data:image/svg+xml;base64,' + btoa(
+                `<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" fill="#6366f1"/><text x="48" y="60" font-size="40" fill="white" text-anchor="middle" font-family="sans-serif">${name[0].toUpperCase()}</text></svg>`
+            );
+        }
+    }, true);
+
     // Toast notification system
     window.showToast = function(message, type = 'info') {
         let container = document.querySelector('.toast-container');
