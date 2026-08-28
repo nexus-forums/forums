@@ -87,10 +87,12 @@
             });
             const data = await res.json();
             if (!data.success) return;
+            const countSpan = btn.querySelector('span');
+            const current = parseInt((countSpan?.textContent || btn.textContent).replace(/[^0-9]/g, '')) || 0;
+            const next = Math.max(0, data.liked ? current + 1 : current - 1);
+            if (countSpan) countSpan.textContent = next;
+            if (btn.firstChild) btn.firstChild.textContent = data.liked ? '❤️ ' : '🤍 ';
             btn.classList.toggle('liked', data.liked);
-            const countSpan = btn.querySelector('span') || btn;
-            const current = parseInt(countSpan.textContent.replace(/[^0-9]/g, ''));
-            countSpan.innerHTML = data.liked ? '❤️ ' + (current + 1) : '🤍 ' + Math.max(0, current - 1);
         } catch (e) { showToast('Failed to like', 'error'); }
     };
 

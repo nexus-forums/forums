@@ -339,6 +339,11 @@ const threadPageHandler = async (req, res) => {
             JOIN users u ON t.user_id = u.id
             WHERE t.id = ?`, [threadId]);
 
+        if (req.user) {
+            const [lk] = await query('SELECT COUNT(*) as c FROM reactions WHERE user_id = ? AND target_type = \'thread\' AND target_id = ?', [req.user.id, threadId]);
+            thread.user_liked = lk.c > 0;
+        } else thread.user_liked = false;
+
         if (!thread) return res.status(404).send(page('Not Found', '<div class="container"><div class="empty-state"><h3>Thread not found</h3></div></div>', req.user));
 
         const pageNum = Math.max(1, parseInt(req.query.page) || 1);
@@ -347,10 +352,11 @@ const threadPageHandler = async (req, res) => {
 
         const replies = await query(`
             SELECT r.*, u.username, u.display_name, u.avatar, u.role, u.reputation, u.post_count, u.created_at as user_created,
-                (SELECT COUNT(*) FROM reactions WHERE target_type = 'reply' AND target_id = r.id) as likes
+                (SELECT COUNT(*) FROM reactions WHERE target_type = 'reply' AND target_id = r.id) as likes,
+                (SELECT COUNT(*) FROM reactions WHERE target_type = 'reply' AND target_id = r.id AND user_id = ?) as user_liked
             FROM replies r JOIN users u ON r.user_id = u.id
             WHERE r.thread_id = ? AND r.parent_id IS NULL ORDER BY r.is_solution DESC, r.created_at ASC LIMIT ? OFFSET ?`,
-            [threadId, limit, offset]);
+            [req.user ? req.user.id : 0, threadId, limit, offset]);
 
         const [replyCount] = await query('SELECT COUNT(*) as total FROM replies WHERE thread_id = ? AND parent_id IS NULL', [threadId]);
         const totalReplies = replyCount.total;
@@ -386,7 +392,7 @@ const threadPageHandler = async (req, res) => {
                             ${isThread && thread.is_locked ? '<span style="background:var(--danger);color:white;padding:0.15rem 0.5rem;border-radius:var(--radius-sm);font-size:0.7rem;font-weight:700">🔒 Locked</span>' : ''}
                         </div>
                         <div class="post-actions">
-                            <button onclick="handleLike('${isThread ? 'thread' : 'reply'}', ${p.id}, this)">🤍 <span>${p.likes || 0}</span></button>
+                            <button onclick="handleLike('${isThread ? 'thread' : 'reply'}', ${p.id}, this)">${p.user_liked ? '❤️' : '🤍'} <span>${isThread ? (p.like_count || 0) : (p.likes || 0)}</span></button>
                             ${!isThread && (req.user?.id === thread.user_id || isMod) ? `<button onclick="fetch('/api/replies/${p.id}/solution',{method:'PATCH'}).then(()=>location.reload())" title="Mark as solution">✓</button>` : ''}
                             ${editActions}
                             ${modActions}
