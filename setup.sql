@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
     email VARCHAR(255) NOT NULL UNIQUE,
     password_hash VARCHAR(255) NOT NULL,
     display_name VARCHAR(100),
-    avatar VARCHAR(255) DEFAULT NULL,
+    avatar VARCHAR(1000) DEFAULT NULL,
     bio TEXT DEFAULT NULL,
     role ENUM('user', 'moderator', 'admin') DEFAULT 'user',
     reputation INT DEFAULT 0,

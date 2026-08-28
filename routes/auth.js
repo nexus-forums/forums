@@ -155,17 +155,31 @@ router.get('/me', requireAuth, async (req, res) => {
 // Update profile
 router.patch('/me', requireAuth, async (req, res) => {
     try {
-        const { display_name, bio } = await req.json();
+        const { display_name, bio, avatar, email } = await req.json();
         const updates = [];
         const values = [];
 
         if (display_name !== undefined) {
+            if (display_name.length > 100) return res.status(400).json({ success: false, error: 'Display name too long (max 100)' });
             updates.push('display_name = ?');
-            values.push(display_name);
+            values.push(display_name || null);
         }
         if (bio !== undefined) {
+            if (bio.length > 2000) return res.status(400).json({ success: false, error: 'Bio too long (max 2000)' });
             updates.push('bio = ?');
             values.push(bio);
+        }
+        if (avatar !== undefined) {
+            if (avatar && avatar.length > 1000) return res.status(400).json({ success: false, error: 'Avatar URL/data too long (max 1000)' });
+            updates.push('avatar = ?');
+            values.push(avatar || generateAvatar(req.user.username));
+        }
+        if (email !== undefined) {
+            if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ success: false, error: 'Invalid email address' });
+            const [dupe] = await query('SELECT id FROM users WHERE email = ? AND id != ?', [email, req.user.id]);
+            if (dupe) return res.status(400).json({ success: false, error: 'Email already in use' });
+            updates.push('email = ?');
+            values.push(email);
         }
 
         if (updates.length === 0) {
@@ -178,6 +192,28 @@ router.patch('/me', requireAuth, async (req, res) => {
         res.json({ success: true, message: 'Profile updated' });
     } catch (error) {
         res.status(500).json({ success: false, error: 'Update failed' });
+    }
+});
+
+// Change password
+router.post('/password', requireAuth, async (req, res) => {
+    try {
+        const { current_password, new_password } = await req.json();
+        if (!current_password || !new_password) return res.status(400).json({ success: false, error: 'Both fields are required' });
+        if (new_password.length < 6) return res.status(400).json({ success: false, error: 'New password must be at least 6 characters' });
+
+        const [user] = await query('SELECT password_hash FROM users WHERE id = ?', [req.user.id]);
+        if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+
+        const valid = await bcrypt.compare(current_password, user.password_hash);
+        if (!valid) return res.status(401).json({ success: false, error: 'Current password is incorrect' });
+
+        const password_hash = await bcrypt.hash(new_password, BCRYPT_ROUNDS);
+        await query('UPDATE users SET password_hash = ? WHERE id = ?', [password_hash, req.user.id]);
+
+        res.json({ success: true, message: 'Password updated' });
+    } catch (error) {
+        res.status(500).json({ success: false, error: 'Password change failed' });
     }
 });
 

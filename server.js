@@ -962,6 +962,129 @@ app.get('/register', async (req, res) => {
 });
 
 // Notifications page
+// Settings page
+app.get('/settings', authenticate, async (req, res) => {
+    try {
+        if (!req.user) return res.redirect('/login');
+        const [me] = await query('SELECT id, username, display_name, email, avatar, bio, role, reputation, post_count, created_at FROM users WHERE id = ?', [req.user.id]);
+        if (!me) return res.status(404).send('Not Found');
+
+        const body = `
+        <div class="container" style="padding-top:2rem;max-width:800px">
+            <div class="section-header">
+                <h2>⚙️ Settings</h2>
+            </div>
+
+            <div class="card" style="padding:1.5rem;margin-bottom:1.5rem">
+                <h3 style="margin-bottom:1rem">Profile</h3>
+                <form id="profileForm">
+                    <div style="display:flex;align-items:center;gap:1rem;margin-bottom:1.25rem">
+                        <img id="avatarPreview" src="${me.avatar || generateAvatar(me.username)}" alt="avatar" width="72" height="72" style="border-radius:50%;border:2px solid var(--border)">
+                        <div style="flex:1">
+                            <label class="form-label" for="avatarInput">Avatar URL (leave empty for default)</label>
+                            <input class="form-input" id="avatarInput" type="text" value="${me.avatar && !me.avatar.startsWith('data:') ? escapeHtml(me.avatar) : ''}" placeholder="https://example.com/avatar.png" style="width:100%">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="displayName">Display Name</label>
+                        <input class="form-input" id="displayName" type="text" maxlength="100" value="${escapeHtml(me.display_name || me.username)}" style="width:100%">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="bio">Bio</label>
+                        <textarea class="form-textarea" id="bio" rows="3" maxlength="2000" placeholder="Tell the community about yourself...">${escapeHtml(me.bio || '')}</textarea>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="email">Email</label>
+                        <input class="form-input" id="email" type="email" value="${escapeHtml(me.email)}" style="width:100%">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Username</label>
+                        <input class="form-input" type="text" value="${escapeHtml(me.username)}" disabled style="width:100%;opacity:0.6">
+                        <span class="form-hint">Usernames cannot be changed</span>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Save Profile</button>
+                </form>
+            </div>
+
+            <div class="card" style="padding:1.5rem;margin-bottom:1.5rem">
+                <h3 style="margin-bottom:1rem">Change Password</h3>
+                <form id="passwordForm">
+                    <div class="form-group">
+                        <label class="form-label" for="currentPassword">Current Password</label>
+                        <input class="form-input" id="currentPassword" type="password" required style="width:100%">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="newPassword">New Password</label>
+                        <input class="form-input" id="newPassword" type="password" minlength="6" required style="width:100%">
+                        <span class="form-hint">Minimum 6 characters</span>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="confirmPassword">Confirm New Password</label>
+                        <input class="form-input" id="confirmPassword" type="password" minlength="6" required style="width:100%">
+                    </div>
+                    <button type="submit" class="btn btn-primary">Update Password</button>
+                </form>
+            </div>
+
+            <div class="card" style="padding:1.5rem">
+                <h3 style="margin-bottom:1rem">Account</h3>
+                <div class="thread-meta" style="flex-direction:column;gap:0.5rem;align-items:flex-start">
+                    <span>Role: <strong>${me.role}</strong></span>
+                    <span>Reputation: <strong>${me.reputation}</strong></span>
+                    <span>Posts: <strong>${me.post_count}</strong></span>
+                    <span>Member since: <strong>${new Date(me.created_at).toLocaleDateString()}</strong></span>
+                </div>
+            </div>
+        </div>
+        <script>
+        (function() {
+            const avatarInput = document.getElementById('avatarInput');
+            avatarInput.addEventListener('change', () => {
+                const v = avatarInput.value.trim();
+                if (v) document.getElementById('avatarPreview').src = v;
+            });
+
+            document.getElementById('profileForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                try {
+                    const payload = {
+                        display_name: document.getElementById('displayName').value.trim(),
+                        bio: document.getElementById('bio').value,
+                        avatar: document.getElementById('avatarInput').value.trim() || null,
+                        email: document.getElementById('email').value.trim()
+                    };
+                    const r = await fetch('/api/auth/me', { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+                    const d = await r.json();
+                    if (d.success) { showToast('Profile saved', 'success'); setTimeout(() => location.reload(), 800); }
+                    else showToast(d.error || 'Save failed', 'error');
+                } catch (err) { showToast('Save failed', 'error'); }
+            });
+
+            document.getElementById('passwordForm').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const np = document.getElementById('newPassword').value;
+                if (np !== document.getElementById('confirmPassword').value) return showToast('Passwords do not match', 'error');
+                try {
+                    const r = await fetch('/api/auth/password', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({
+                        current_password: document.getElementById('currentPassword').value,
+                        new_password: np
+                    })});
+                    const d = await r.json();
+                    if (d.success) { showToast('Password updated', 'success'); e.target.reset(); }
+                    else showToast(d.error || 'Update failed', 'error');
+                } catch (err) { showToast('Update failed', 'error'); }
+            });
+        })();
+        </script>`;
+
+        res.header('Content-Type', 'text/html');
+        res.send(page('Settings', body, req.user));
+    } catch (error) {
+        console.error('Settings error:', error);
+        res.status(500).send('Server Error');
+    }
+});
+
 app.get('/notifications', authenticate, async (req, res) => {
     if (!req.user) return res.redirect('/login?return=/notifications');
     const notifications = await query('SELECT n.*, u.username, u.avatar FROM notifications n LEFT JOIN users u ON n.actor_id = u.id WHERE n.user_id = ? ORDER BY n.created_at DESC LIMIT 50', [req.user.id]);
