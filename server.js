@@ -1581,15 +1581,21 @@ app.get('/notifications', authenticate, async (req, res) => {
 app.get('/moderate', requireRole(['moderator', 'admin']), async (req, res) => {
     try {
         const cats = await query('SELECT id, name FROM categories WHERE is_hidden = FALSE ORDER BY name');
+        const perPage = 50;
+        const tpage = Math.max(1, parseInt(req.query.tpage) || 1);
+        const rpage = Math.max(1, parseInt(req.query.rpage) || 1);
+        const initialTab = ['reports', 'threads', 'replies', 'pending'].includes(req.query.tab) ? req.query.tab : 'reports';
         const threads = await query(`
             SELECT t.id, t.title, t.slug, t.is_pinned, t.is_locked, t.reply_count, t.views, t.created_at,
                    c.name as category_name, u.username
             FROM threads t JOIN categories c ON c.id = t.category_id JOIN users u ON u.id = t.user_id
-            ORDER BY t.created_at DESC LIMIT 100`);
+            ORDER BY t.created_at DESC LIMIT ? OFFSET ?`, [perPage, (tpage - 1) * perPage]);
+        const [threadTotal] = await query('SELECT COUNT(*) as c FROM threads');
         const replies = await query(`
             SELECT r.id, r.content, r.created_at, t.id as thread_id, t.title as thread_title, u.username
             FROM replies r JOIN threads t ON t.id = r.thread_id JOIN users u ON u.id = r.user_id
-            ORDER BY r.created_at DESC LIMIT 100`);
+            ORDER BY r.created_at DESC LIMIT ? OFFSET ?`, [perPage, (rpage - 1) * perPage]);
+        const [replyTotal] = await query('SELECT COUNT(*) as c FROM replies');
         const reports = await query(`
             SELECT rp.*, u.username as reporter_username,
                    t.title as thread_title, t.slug as thread_slug, tu.username as thread_author,
@@ -1639,6 +1645,30 @@ app.get('/moderate', requireRole(['moderator', 'admin']), async (req, res) => {
                 <div class="thread-meta" style="flex-shrink:0"><span>@${escapeHtml(r.username)}</span><span>${timeAgo(r.created_at)}</span></div>
             </div>`).join('');
 
+        const pageNav = (tab, page, total, pageParam) => {
+            const pages = Math.max(1, Math.ceil(total / perPage));
+            if (pages <= 1) return '';
+            const link = p => {
+                const params = new URLSearchParams();
+                params.set('tab', tab);
+                params.set('tpage', pageParam === 'tpage' ? p : tpage);
+                params.set('rpage', pageParam === 'rpage' ? p : rpage);
+                return `/moderate?${params.toString()}`;
+            };
+            let html = '<div class="pagination">';
+            if (page > 1) html += `<a href="${link(page - 1)}">←</a>`;
+            for (let i = 1; i <= pages; i++) {
+                if (i === page) html += `<span class="current">${i}</span>`;
+                else if (i === 1 || i === pages || Math.abs(i - page) <= 2) html += `<a href="${link(i)}">${i}</a>`;
+                else if (Math.abs(i - page) === 3) html += '<span class="ellipsis">…</span>';
+            }
+            if (page < pages) html += `<a href="${link(page + 1)}">→</a>`;
+            html += '</div>';
+            return html;
+        };
+        const threadPagesNav = pageNav('threads', tpage, threadTotal.c, 'tpage');
+        const replyPagesNav = pageNav('replies', rpage, replyTotal.c, 'rpage');
+
         const reportRows = reports.length === 0 ? '<div class="empty-state" style="padding:1.5rem">No pending reports</div>' : reports.map(rp => {
             const isThread = rp.target_type === 'thread';
             const link = isThread ? `/t/${rp.target_id}/${rp.thread_slug}` : `/t/${rp.reply_thread_id}/${rp.reply_thread_slug}`;
@@ -1676,14 +1706,14 @@ app.get('/moderate', requireRole(['moderator', 'admin']), async (req, res) => {
                 <span style="margin-left:auto;color:var(--text-muted);font-size:0.8rem" id="modStatus"></span>
             </div>
             <div style="display:flex;gap:0.75rem;margin-bottom:1rem">
-                <button class="btn btn-ghost" id="tabReports" onclick="showTab('reports')" style="font-weight:700">⚑ Reports (${reports.length})</button>
-                <button class="btn btn-ghost" id="tabThreads" onclick="showTab('threads')">Threads</button>
-                <button class="btn btn-ghost" id="tabReplies" onclick="showTab('replies')">Replies</button>
-                <button class="btn btn-ghost" id="tabPending" onclick="showTab('pending')">⏳ Pending Posts (${pendingThreads.length + pendingReplies.length})</button>
+                <a class="btn btn-ghost" id="tabReports" href="/moderate?tab=reports" style="${initialTab === 'reports' ? 'font-weight:700' : ''}">⚑ Reports (${reports.length})</a>
+                <a class="btn btn-ghost" id="tabThreads" href="/moderate?tab=threads" style="${initialTab === 'threads' ? 'font-weight:700' : ''}">Threads</a>
+                <a class="btn btn-ghost" id="tabReplies" href="/moderate?tab=replies" style="${initialTab === 'replies' ? 'font-weight:700' : ''}">Replies</a>
+                <a class="btn btn-ghost" id="tabPending" href="/moderate?tab=pending" style="${initialTab === 'pending' ? 'font-weight:700' : ''}">⏳ Pending Posts (${pendingThreads.length + pendingReplies.length})</a>
             </div>
             <div id="sectionReports" class="thread-list">${reportRows}</div>
-            <div id="sectionThreads" class="thread-list" style="display:none">${threadRows || '<div class="empty-state">No threads</div>'}</div>
-            <div id="sectionReplies" class="thread-list" style="display:none">${replyRows || '<div class="empty-state">No replies</div>'}</div>
+            <div id="sectionThreads" class="thread-list" style="display:none">${threadRows || '<div class="empty-state">No threads</div>'}${threadPagesNav}</div>
+            <div id="sectionReplies" class="thread-list" style="display:none">${replyRows || '<div class="empty-state">No replies</div>'}${replyPagesNav}</div>
             <div id="sectionPending" class="thread-list" style="display:none">
                 ${pendingThreads.length === 0 && pendingReplies.length === 0 ? '<div class="empty-state" style="padding:1.5rem">Nothing pending review</div>' : ''}
                 ${pendingThreads.map(pt => `
@@ -1713,6 +1743,7 @@ app.get('/moderate', requireRole(['moderator', 'admin']), async (req, res) => {
             </div>
         </div>
         <script>
+        showTab('${initialTab}');
         function showTab(which) {
             document.getElementById('sectionThreads').style.display = which === 'threads' ? '' : 'none';
             document.getElementById('sectionReplies').style.display = which === 'replies' ? '' : 'none';
