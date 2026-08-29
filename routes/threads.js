@@ -2,6 +2,7 @@ const HyperExpress = require('hyper-express');
 const { query, transaction } = require('../config/db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { slugify, timeAgo, generateAvatar } = require('../utils/helpers');
+const { checkContent } = require('../utils/filter');
 const router = new HyperExpress.Router();
 
 // List threads with filters
@@ -22,7 +23,7 @@ router.get('/api/threads', async (req, res) => {
             JOIN categories c ON t.category_id = c.id
             JOIN users u ON t.user_id = u.id
             LEFT JOIN users lu ON t.last_post_user_id = lu.id
-            WHERE t.is_pinned = FALSE AND c.is_hidden = FALSE
+            WHERE t.is_pinned = FALSE AND c.is_hidden = FALSE AND t.moderation_status = 'visible'
         `;
         let countSql = `SELECT COUNT(*) as total FROM threads t JOIN categories c ON t.category_id = c.id WHERE t.is_pinned = FALSE AND c.is_hidden = FALSE`;
         let params = [];
@@ -53,7 +54,7 @@ router.get('/api/threads', async (req, res) => {
                 u.username, u.display_name, u.avatar, lu.username as last_username
                 FROM threads t JOIN categories c ON t.category_id = c.id JOIN users u ON t.user_id = u.id
                 LEFT JOIN users lu ON t.last_post_user_id = lu.id
-                WHERE c.slug = ? AND t.is_pinned = TRUE ORDER BY t.last_post_at DESC`, [category]) : [],
+                WHERE c.slug = ? AND t.is_pinned = TRUE AND t.moderation_status = 'visible' ORDER BY t.last_post_at DESC`, [category]) : [],
             query(countSql, params)
         ]);
 
@@ -95,6 +96,9 @@ const threadDetailHandler = async (req, res) => {
             WHERE t.id = ?`, [threadId]);
 
         if (threads.length === 0) return res.status(404).json({ success: false, error: 'Thread not found' });
+        if (threads[0].moderation_status === 'pending' && !(req.user && (['moderator', 'admin'].includes(req.user.role) || req.user.id === threads[0].user_id))) {
+            return res.status(404).json({ success: false, error: 'Thread not found' });
+        }
 
         const page = Math.max(1, parseInt(req.query.page) || 1);
         const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
@@ -107,10 +111,11 @@ const threadDetailHandler = async (req, res) => {
             FROM replies r
             JOIN users u ON r.user_id = u.id
             WHERE r.thread_id = ? AND r.parent_id IS NULL
+                AND (r.moderation_status = 'visible' OR r.user_id = ? OR ?)
             ORDER BY r.is_solution DESC, r.created_at ASC
-            LIMIT ? OFFSET ?`, [req.user?.id || 0, threadId, limit, offset]);
+            LIMIT ? OFFSET ?`, [req.user?.id || 0, threadId, req.user?.id || 0, req.user && ['moderator','admin'].includes(req.user.role) ? 1 : 0, limit, offset]);
 
-        const [replyCount] = await query('SELECT COUNT(*) as total FROM replies WHERE thread_id = ? AND parent_id IS NULL', [threadId]);
+        const [replyCount] = await query('SELECT COUNT(*) as total FROM replies WHERE thread_id = ? AND parent_id IS NULL AND (moderation_status = \'visible\' OR user_id = ? OR ?)', [threadId, req.user?.id || 0, req.user && ['moderator','admin'].includes(req.user.role) ? 1 : 0]);
 
         res.json({
             success: true,
@@ -141,11 +146,21 @@ router.post('/api/threads', requireAuth, async (req, res) => {
             return res.status(400).json({ success: false, error: 'Content must be at least 10 characters' });
         }
 
+        const isMod = ['moderator', 'admin'].includes(req.user.role);
+        let pending = false;
+        if (!isMod) {
+            const filterResult = await checkContent(`${title}\n${content}`);
+            if (filterResult.blocked.length > 0) {
+                return res.status(400).json({ success: false, error: `Your post contains banned word(s): ${filterResult.blocked.join(', ')}` });
+            }
+            pending = filterResult.flagged.length > 0;
+        }
+
         const slug = slugify(title);
         const result = await transaction(async (conn) => {
             const [insertResult] = await conn.execute(
-                'INSERT INTO threads (category_id, user_id, title, slug, content) VALUES (?, ?, ?, ?, ?)',
-                [category_id, req.user.id, title, slug, content]
+                'INSERT INTO threads (category_id, user_id, title, slug, content, moderation_status) VALUES (?, ?, ?, ?, ?, ?)',
+                [category_id, req.user.id, title, slug, content, pending ? 'pending' : 'visible']
             );
             await conn.execute('UPDATE categories SET thread_count = thread_count + 1 WHERE id = ?', [category_id]);
             await conn.execute('UPDATE users SET post_count = post_count + 1 WHERE id = ?', [req.user.id]);
@@ -160,7 +175,7 @@ router.post('/api/threads', requireAuth, async (req, res) => {
             }
         }
 
-        res.status(201).json({ success: true, thread: { id: result.insertId, title, slug } });
+        res.status(201).json({ success: true, thread: { id: result.insertId, title, slug }, pending, message: pending ? 'Your post contains keywords that require review — it has been submitted to the moderation queue.' : undefined });
     } catch (error) {
         console.error('Create thread error:', error);
         res.status(500).json({ success: false, error: 'Failed to create thread' });
@@ -181,10 +196,20 @@ router.post('/api/threads/:id/replies', requireAuth, async (req, res) => {
         if (!threadCheck) return res.status(404).json({ success: false, error: 'Thread not found' });
         if (threadCheck.is_locked) return res.status(403).json({ success: false, error: 'Thread is locked' });
 
+        const isMod = ['moderator', 'admin'].includes(req.user.role);
+        let pending = false;
+        if (!isMod) {
+            const filterResult = await checkContent(content);
+            if (filterResult.blocked.length > 0) {
+                return res.status(400).json({ success: false, error: `Your reply contains banned word(s): ${filterResult.blocked.join(', ')}` });
+            }
+            pending = filterResult.flagged.length > 0;
+        }
+
         const result = await transaction(async (conn) => {
             const [insertResult] = await conn.execute(
-                'INSERT INTO replies (thread_id, user_id, content, parent_id) VALUES (?, ?, ?, ?)',
-                [threadId, req.user.id, content, parent_id || null]
+                'INSERT INTO replies (thread_id, user_id, content, parent_id, moderation_status) VALUES (?, ?, ?, ?, ?)',
+                [threadId, req.user.id, content, parent_id || null, pending ? 'pending' : 'visible']
             );
             await conn.execute('UPDATE threads SET reply_count = reply_count + 1, last_post_at = NOW(), last_post_user_id = ? WHERE id = ?', [req.user.id, threadId]);
             await conn.execute('UPDATE categories SET post_count = post_count + 1 WHERE id = (SELECT category_id FROM threads WHERE id = ?)', [threadId]);
@@ -204,7 +229,7 @@ router.post('/api/threads/:id/replies', requireAuth, async (req, res) => {
             SELECT r.*, u.username, u.display_name, u.avatar, u.role, u.reputation
             FROM replies r JOIN users u ON r.user_id = u.id WHERE r.id = ?`, [result.insertId]);
 
-        res.status(201).json({ success: true, reply: newReply });
+        res.status(201).json({ success: true, reply: newReply, pending, message: pending ? 'Your reply contains keywords that require review — it has been submitted to the moderation queue.' : undefined });
     } catch (error) {
         console.error('Reply error:', error);
         res.status(500).json({ success: false, error: 'Failed to post reply' });
@@ -421,6 +446,54 @@ router.post('/api/mod/reports/:id/resolve', requireRole(['moderator', 'admin']),
     }
 });
 
+// Approve/delete posts held in the moderation queue — mod/admin
+router.post('/api/mod/pending/resolve', requireRole(['moderator', 'admin']), async (req, res) => {
+    try {
+        const { type, id, action } = await req.json();
+        const pid = parseInt(id);
+        if (!['thread', 'reply'].includes(type) || !['approve', 'delete'].includes(action) || !pid) {
+            return res.status(400).json({ success: false, error: 'Invalid request' });
+        }
+        if (action === 'approve') {
+            const table = type === 'thread' ? 'threads' : 'replies';
+            const [row] = await query(`SELECT id FROM ${table} WHERE id = ?`, [pid]);
+            if (!row) return res.status(404).json({ success: false, error: 'Post not found' });
+            await query(`UPDATE ${table} SET moderation_status = 'visible' WHERE id = ?`, [pid]);
+            return res.json({ success: true, message: 'Post approved and now visible' });
+        }
+        // delete
+        if (type === 'thread') {
+            await transaction(async conn => {
+                const [t] = await conn.execute('SELECT category_id FROM threads WHERE id = ?', [pid]);
+                if (t.length) {
+                    const [rc] = await conn.execute('SELECT COUNT(*) AS c FROM replies WHERE thread_id = ?', [pid]);
+                    await conn.execute('DELETE r FROM reactions r JOIN replies rp ON r.target_type = "reply" AND r.target_id = rp.id WHERE rp.thread_id = ?', [pid]);
+                    await conn.execute('DELETE FROM reactions WHERE target_type = "thread" AND target_id = ?', [pid]);
+                    await conn.execute('DELETE FROM replies WHERE thread_id = ?', [pid]);
+                    await conn.execute('DELETE FROM thread_tags WHERE thread_id = ?', [pid]);
+                    await conn.execute('DELETE FROM threads WHERE id = ?', [pid]);
+                    await conn.execute('UPDATE categories SET thread_count = GREATEST(thread_count - 1, 0), post_count = GREATEST(post_count - ?, 0) WHERE id = ?', [rc[0].c + 1, t[0].category_id]);
+                }
+            });
+        } else {
+            const [r] = await query('SELECT r.thread_id, t.category_id FROM replies r JOIN threads t ON t.id = r.thread_id WHERE r.id = ?', [pid]);
+            if (r) {
+                await transaction(async conn => {
+                    await conn.execute('DELETE FROM reactions WHERE target_type = "reply" AND target_id = ?', [pid]);
+                    await conn.execute('DELETE FROM replies WHERE id = ?', [pid]);
+                    const [c] = await conn.execute('SELECT COUNT(*) AS c FROM replies WHERE thread_id = ?', [r.thread_id]);
+                    await conn.execute('UPDATE threads SET reply_count = ? WHERE id = ?', [c[0].c, r.thread_id]);
+                    await conn.execute('UPDATE categories SET post_count = GREATEST(post_count - 1, 0) WHERE id = ?', [r.category_id]);
+                });
+            }
+        }
+        res.json({ success: true, message: 'Post deleted' });
+    } catch (error) {
+        console.error('Pending resolve error:', error);
+        res.status(500).json({ success: false, error: 'Action failed' });
+    }
+});
+
 // Bulk moderation (threads or replies) — mod/admin
 router.post('/api/mod/bulk', requireRole(['moderator', 'admin']), async (req, res) => {
     try {
@@ -525,6 +598,16 @@ router.patch('/api/threads/:id', requireAuth, async (req, res) => {
             if (!content.trim() || content.trim().length < 10) {
                 return res.status(400).json({ success: false, error: 'Content must be at least 10 characters' });
             }
+            if (!['moderator', 'admin'].includes(req.user.role)) {
+                const filterResult = await checkContent(`${title !== undefined ? title + '\n' : ''}${content}`);
+                if (filterResult.blocked.length > 0) {
+                    return res.status(400).json({ success: false, error: `Your post contains banned word(s): ${filterResult.blocked.join(', ')}` });
+                }
+                if (filterResult.flagged.length > 0) {
+                    updates.push('moderation_status = ?');
+                    values.push('pending');
+                }
+            }
             updates.push('content = ?');
             values.push(content.trim());
         }
@@ -552,8 +635,20 @@ router.patch('/api/replies/:id', requireAuth, async (req, res) => {
         if (!content || !content.trim() || content.trim().length < 2) {
             return res.status(400).json({ success: false, error: 'Content must be at least 2 characters' });
         }
-        await query('UPDATE replies SET content = ?, edited_at = NOW() WHERE id = ?', [content.trim(), req.params.id]);
-        res.json({ success: true, message: 'Reply updated' });
+        let pendingFlag = false;
+        if (!['moderator', 'admin'].includes(req.user.role)) {
+            const filterResult = await checkContent(content);
+            if (filterResult.blocked.length > 0) {
+                return res.status(400).json({ success: false, error: `Your reply contains banned word(s): ${filterResult.blocked.join(', ')}` });
+            }
+            pendingFlag = filterResult.flagged.length > 0;
+        }
+        if (pendingFlag) {
+            await query('UPDATE replies SET content = ?, edited_at = NOW(), moderation_status = \'pending\' WHERE id = ?', [content.trim(), req.params.id]);
+        } else {
+            await query('UPDATE replies SET content = ?, edited_at = NOW() WHERE id = ?', [content.trim(), req.params.id]);
+        }
+        res.json({ success: true, message: pendingFlag ? 'Reply updated and submitted for moderation review.' : 'Reply updated' });
     } catch (error) {
         console.error('Edit reply error:', error);
         res.status(500).json({ success: false, error: 'Update failed' });

@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS threads (
     last_post_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_post_user_id INT DEFAULT NULL,
     edited_at DATETIME NULL DEFAULT NULL,
+    moderation_status ENUM('visible','pending') NOT NULL DEFAULT 'visible',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
@@ -78,6 +79,7 @@ CREATE TABLE IF NOT EXISTS replies (
     like_count INT DEFAULT 0,
     is_solution BOOLEAN DEFAULT FALSE,
     edited_at DATETIME NULL DEFAULT NULL,
+    moderation_status ENUM('visible','pending') NOT NULL DEFAULT 'visible',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (thread_id) REFERENCES threads(id) ON DELETE CASCADE,
@@ -210,6 +212,15 @@ CREATE TABLE IF NOT EXISTS reports (
     INDEX idx_target (target_type, target_id),
     INDEX idx_status (status),
     FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Banned words / moderation keyword filter
+CREATE TABLE IF NOT EXISTS banned_words (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    word VARCHAR(100) NOT NULL,
+    action ENUM('block','moderate') NOT NULL DEFAULT 'block',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_word (word)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Insert default categories

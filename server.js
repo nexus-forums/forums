@@ -10,6 +10,7 @@ const { pool, query } = require('./config/db');
 const { page, alertBox } = require('./utils/render');
 const { timeAgo, slugify, escapeHtml, generateAvatar, iconSvg } = require('./utils/helpers');
 const { authenticate, requireRole } = require('./middleware/auth');
+const { checkContent, clearCache } = require('./utils/filter');
 const authRouter = require('./routes/auth');
 const threadsRouter = require('./routes/threads');
 
@@ -108,10 +109,12 @@ app.get('/', async (req, res) => {
             query(`SELECT t.*, c.name as category_name, c.slug as category_slug, c.color as category_color,
                 u.username, u.display_name, u.avatar
                 FROM threads t JOIN categories c ON t.category_id = c.id JOIN users u ON t.user_id = u.id
+                WHERE t.moderation_status = 'visible'
                 ORDER BY t.views DESC LIMIT 4`),
             query(`SELECT t.*, c.name as category_name, c.slug as category_slug, c.color as category_color,
                 u.username, u.display_name, u.avatar
                 FROM threads t JOIN categories c ON t.category_id = c.id JOIN users u ON t.user_id = u.id
+                WHERE t.moderation_status = 'visible'
                 ORDER BY t.last_post_at DESC LIMIT 6`),
             query('SELECT id, username, display_name, avatar, reputation FROM users WHERE is_banned = FALSE ORDER BY reputation DESC LIMIT 5'),
             query(`SELECT (SELECT COUNT(*) FROM users) as users, (SELECT COUNT(*) FROM threads) as threads, (SELECT COUNT(*) FROM replies) as replies`)
@@ -275,9 +278,9 @@ app.get('/c/:slug', async (req, res) => {
                 FROM threads t
                 JOIN users u ON t.user_id = u.id
                 LEFT JOIN users lu ON t.last_post_user_id = lu.id
-                WHERE t.category_id = ? ORDER BY t.is_pinned DESC, t.last_post_at DESC LIMIT ? OFFSET ?`,
+                WHERE t.category_id = ? AND t.moderation_status = 'visible' ORDER BY t.is_pinned DESC, t.last_post_at DESC LIMIT ? OFFSET ?`,
                 [category.id, limit, offset]),
-            query('SELECT COUNT(*) as total FROM threads WHERE category_id = ?', [category.id])
+            query('SELECT COUNT(*) as total FROM threads WHERE category_id = ? AND moderation_status = ?', [category.id, 'visible'])
         ]);
 
         const total = countResult[0].total;
@@ -365,6 +368,14 @@ const threadPageHandler = async (req, res) => {
         } else thread.user_liked = false;
 
         if (!thread) return res.status(404).send(page('Not Found', '<div class="container"><div class="empty-state"><h3>Thread not found</h3></div></div>', req.user));
+        const isMod = req.user && ['moderator', 'admin'].includes(req.user.role);
+        const canSeePending = isMod || (req.user && req.user.id === thread.user_id);
+        if (thread.moderation_status === 'pending' && !canSeePending) {
+            return res.status(404).send(page('Not Found', '<div class="container"><div class="empty-state"><h3>Thread not found</h3></div></div>', req.user));
+        }
+        if (thread.moderation_status === 'pending') {
+            thread._pendingNotice = '<div class="card" style="border-left:3px solid var(--warning);padding:1rem;margin-bottom:1.5rem">⏳ This post is <strong>pending moderation review</strong> and is not publicly visible until approved.</div>';
+        } else thread._pendingNotice = '';
         const modCategories = req.user && ['moderator', 'admin'].includes(req.user.role) ? await query('SELECT id, name FROM categories WHERE is_hidden = FALSE ORDER BY name') : [];
 
         const threadTags = await query(`SELECT g.id, g.name, g.slug, g.color FROM tags g JOIN thread_tags tt ON tt.tag_id = g.id WHERE tt.thread_id = ? ORDER BY g.name`, [threadId]);
@@ -379,10 +390,12 @@ const threadPageHandler = async (req, res) => {
                 (SELECT COUNT(*) FROM reactions WHERE target_type = 'reply' AND target_id = r.id) as likes,
                 (SELECT COUNT(*) FROM reactions WHERE target_type = 'reply' AND target_id = r.id AND user_id = ?) as user_liked
             FROM replies r JOIN users u ON r.user_id = u.id
-            WHERE r.thread_id = ? AND r.parent_id IS NULL ORDER BY r.is_solution DESC, r.created_at ASC LIMIT ? OFFSET ?`,
-            [req.user ? req.user.id : 0, threadId, limit, offset]);
+            WHERE r.thread_id = ? AND r.parent_id IS NULL
+                AND (r.moderation_status = 'visible' OR r.user_id = ? OR ?)
+            ORDER BY r.is_solution DESC, r.created_at ASC LIMIT ? OFFSET ?`,
+            [req.user ? req.user.id : 0, threadId, req.user ? req.user.id : 0, isMod ? 1 : 0, limit, offset]);
 
-        const [replyCount] = await query('SELECT COUNT(*) as total FROM replies WHERE thread_id = ? AND parent_id IS NULL', [threadId]);
+        const [replyCount] = await query('SELECT COUNT(*) as total FROM replies WHERE thread_id = ? AND parent_id IS NULL AND (moderation_status = \'visible\' OR user_id = ? OR ?)', [threadId, req.user ? req.user.id : 0, isMod ? 1 : 0]);
         const totalReplies = replyCount.total;
         const pages = Math.ceil(totalReplies / limit);
 
@@ -391,6 +404,7 @@ const threadPageHandler = async (req, res) => {
             const isAuthor = req.user && req.user.id === (isThread ? thread.user_id : p.user_id);
             const isMod = req.user && ['moderator', 'admin'].includes(req.user.role);
             const solutionBadge = p.is_solution ? '<span style="background:var(--success);color:white;padding:0.15rem 0.5rem;border-radius:var(--radius-sm);font-size:0.7rem;font-weight:700;margin-left:0.5rem">✓ Solution</span>' : '';
+            const pendingBadge = p.moderation_status === 'pending' ? '<span style="background:var(--warning);color:white;padding:0.15rem 0.5rem;border-radius:var(--radius-sm);font-size:0.7rem;font-weight:700;margin-left:0.5rem">⏳ Pending review</span>' : '';
             const modActions = isMod ? `
                 <button onclick="fetch('/api/threads/${thread.id}/lock',{method:'PATCH'}).then(()=>location.reload())" title="${thread.is_locked ? 'Unlock' : 'Lock'}">🔒</button>
                 <button onclick="fetch('/api/threads/${thread.id}/pin',{method:'PATCH'}).then(()=>location.reload())" title="${thread.is_pinned ? 'Unpin' : 'Pin'}">📌</button>
@@ -419,6 +433,7 @@ const threadPageHandler = async (req, res) => {
                             <time>${timeAgo(p.created_at)}</time>
                             ${p.edited_at ? '<span style="color:var(--text-muted);font-size:0.75rem">(edited)</span>' : ''}
                             ${solutionBadge}
+                            ${isThread && thread.moderation_status === 'pending' ? pendingBadge : (!isThread && p.moderation_status === 'pending' ? pendingBadge : '')}
                             ${isThread && thread.is_locked ? '<span style="background:var(--danger);color:white;padding:0.15rem 0.5rem;border-radius:var(--radius-sm);font-size:0.7rem;font-weight:700">🔒 Locked</span>' : ''}
                         </div>
                         <div class="post-actions">
@@ -492,6 +507,7 @@ const threadPageHandler = async (req, res) => {
                 </div>
                 ${threadTagPills ? `<div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.75rem">${threadTagPills}</div>` : ''}
             </div>
+            ${thread._pendingNotice}
             <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);overflow:hidden;margin-bottom:1.5rem">
                 ${posts}
             </div>
@@ -620,7 +636,7 @@ const threadPageHandler = async (req, res) => {
                     body: JSON.stringify({ content })
                 });
                 const data = await res.json();
-                if (data.success) { location.reload(); }
+                if (data.success) { showToast(data.pending && data.message ? data.message : 'Reply posted', 'info'); setTimeout(() => location.reload(), data.pending ? 1500 : 300); }
                 else { showToast(data.error || 'Failed to post', 'error'); }
             } catch (e) { showToast('Network error', 'error'); }
         }
@@ -661,9 +677,9 @@ app.get('/tag/:id/:slug', async (req, res) => {
                 FROM threads t
                 JOIN thread_tags tt ON tt.thread_id = t.id
                 JOIN categories c ON t.category_id = c.id JOIN users u ON t.user_id = u.id
-                WHERE tt.tag_id = ?
+                WHERE tt.tag_id = ? AND t.moderation_status = 'visible'
                 ORDER BY t.is_pinned DESC, t.last_post_at DESC LIMIT ? OFFSET ?`, [tagId, limit, offset]),
-            query('SELECT COUNT(*) as total FROM thread_tags WHERE tag_id = ?', [tagId])
+            query('SELECT COUNT(*) as total FROM thread_tags tt JOIN threads t ON t.id = tt.thread_id WHERE tt.tag_id = ? AND t.moderation_status = ?', [tagId, 'visible'])
         ]);
         const total = countResult[0].total;
         const pages = Math.ceil(total / limit);
@@ -784,7 +800,10 @@ app.get('/new', authenticate, async (req, res) => {
                 body: JSON.stringify({ title, content, category_id, tags })
             });
             const data = await res.json();
-            if (data.success) { window.location = '/t/' + data.thread.id + '/' + data.thread.slug; }
+            if (data.success) {
+                if (data.pending && data.message) showToast(data.message, 'info');
+                setTimeout(() => { window.location = '/t/' + data.thread.id + '/' + data.thread.slug; }, data.pending ? 1500 : 0);
+            }
             else { showToast(data.error || 'Failed to create', 'error'); }
         } catch (e) { showToast('Network error', 'error'); }
     }
@@ -806,12 +825,12 @@ app.get('/u/:username', async (req, res) => {
         const recentThreads = await query(
             `SELECT t.id, t.title, t.slug, t.created_at, t.reply_count, t.views, c.name as category_name, c.slug as category_slug, c.color as category_color
              FROM threads t JOIN categories c ON t.category_id = c.id
-             WHERE t.user_id = ? ORDER BY t.created_at DESC LIMIT 5`, [user.id]);
+             WHERE t.user_id = ? AND t.moderation_status = 'visible' ORDER BY t.created_at DESC LIMIT 5`, [user.id]);
 
         const recentReplies = await query(
             `SELECT r.id, r.content, r.created_at, t.id as thread_id, t.title as thread_title, t.slug as thread_slug
              FROM replies r JOIN threads t ON r.thread_id = t.id
-             WHERE r.user_id = ? ORDER BY r.created_at DESC LIMIT 5`, [user.id]);
+             WHERE r.user_id = ? AND r.moderation_status = 'visible' ORDER BY r.created_at DESC LIMIT 5`, [user.id]);
 
         const threadList = recentThreads.map(t => `
             <a href="/t/${t.id}/${t.slug}" class="thread-card" style="padding:1rem">
@@ -964,8 +983,9 @@ app.get('/latest', async (req, res) => {
                 u.username, u.display_name, u.avatar, lu.username as last_username
                 FROM threads t JOIN categories c ON t.category_id = c.id JOIN users u ON t.user_id = u.id
                 LEFT JOIN users lu ON t.last_post_user_id = lu.id
+                WHERE t.moderation_status = 'visible'
                 ORDER BY t.last_post_at DESC LIMIT ? OFFSET ?`, [limit, offset]),
-            query('SELECT COUNT(*) as total FROM threads')
+            query('SELECT COUNT(*) as total FROM threads WHERE moderation_status = ?', ['visible'])
         ]);
         const total = countResult[0].total;
         const pages = Math.ceil(total / limit);
@@ -1583,6 +1603,14 @@ app.get('/moderate', requireRole(['moderator', 'admin']), async (req, res) => {
             LEFT JOIN threads rt ON rt.id = rc.thread_id
             WHERE rp.status = 'pending'
             ORDER BY rp.created_at ASC`);
+        const pendingThreads = await query(`
+            SELECT t.id, t.title, t.slug, t.content, t.created_at, c.name as category_name, u.username, u.display_name
+            FROM threads t JOIN categories c ON c.id = t.category_id JOIN users u ON u.id = t.user_id
+            WHERE t.moderation_status = 'pending' ORDER BY t.created_at ASC`);
+        const pendingReplies = await query(`
+            SELECT r.id, r.content, r.created_at, t.id as thread_id, t.slug as thread_slug, t.title as thread_title, u.username, u.display_name
+            FROM replies r JOIN threads t ON t.id = r.thread_id JOIN users u ON u.id = r.user_id
+            WHERE r.moderation_status = 'pending' ORDER BY r.created_at ASC`);
 
         const catOptions = cats.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
 
@@ -1651,19 +1679,56 @@ app.get('/moderate', requireRole(['moderator', 'admin']), async (req, res) => {
                 <button class="btn btn-ghost" id="tabReports" onclick="showTab('reports')" style="font-weight:700">⚑ Reports (${reports.length})</button>
                 <button class="btn btn-ghost" id="tabThreads" onclick="showTab('threads')">Threads</button>
                 <button class="btn btn-ghost" id="tabReplies" onclick="showTab('replies')">Replies</button>
+                <button class="btn btn-ghost" id="tabPending" onclick="showTab('pending')">⏳ Pending Posts (${pendingThreads.length + pendingReplies.length})</button>
             </div>
             <div id="sectionReports" class="thread-list">${reportRows}</div>
             <div id="sectionThreads" class="thread-list" style="display:none">${threadRows || '<div class="empty-state">No threads</div>'}</div>
             <div id="sectionReplies" class="thread-list" style="display:none">${replyRows || '<div class="empty-state">No replies</div>'}</div>
+            <div id="sectionPending" class="thread-list" style="display:none">
+                ${pendingThreads.length === 0 && pendingReplies.length === 0 ? '<div class="empty-state" style="padding:1.5rem">Nothing pending review</div>' : ''}
+                ${pendingThreads.map(pt => `
+                <div class="thread-card" style="padding:1rem;align-items:center;border-left:3px solid var(--warning)">
+                    <div class="thread-content" style="flex:1">
+                        <div style="font-size:0.95rem"><strong>Thread</strong> by <a href="/u/${pt.username}">@${escapeHtml(pt.display_name || pt.username)}</a> in ${escapeHtml(pt.category_name)}: <a href="/t/${pt.id}/${pt.slug}">${escapeHtml(pt.title)}</a></div>
+                        <div style="color:var(--text-secondary);font-size:0.85rem">${escapeHtml((pt.content || '').substring(0, 140))}</div>
+                        <div class="thread-meta"><span>${timeAgo(pt.created_at)}</span></div>
+                    </div>
+                    <div style="display:flex;gap:0.5rem;flex-shrink:0">
+                        <button class="btn btn-ghost btn-sm" onclick="resolvePending('thread', ${pt.id}, 'approve')">✓ Approve</button>
+                        <button class="btn btn-danger btn-sm" onclick="resolvePending('thread', ${pt.id}, 'delete')">🗑 Delete</button>
+                    </div>
+                </div>`).join('')}
+                ${pendingReplies.map(pr => `
+                <div class="thread-card" style="padding:1rem;align-items:center;border-left:3px solid var(--warning)">
+                    <div class="thread-content" style="flex:1">
+                        <div style="font-size:0.95rem"><strong>Reply</strong> by <a href="/u/${pr.username}">@${escapeHtml(pr.display_name || pr.username)}</a> in <a href="/t/${pr.thread_id}/${pr.thread_slug}">${escapeHtml(pr.thread_title)}</a>:</div>
+                        <div style="color:var(--text-secondary);font-size:0.85rem">${escapeHtml((pr.content || '').substring(0, 140))}</div>
+                        <div class="thread-meta"><span>${timeAgo(pr.created_at)}</span></div>
+                    </div>
+                    <div style="display:flex;gap:0.5rem;flex-shrink:0">
+                        <button class="btn btn-ghost btn-sm" onclick="resolvePending('reply', ${pr.id}, 'approve')">✓ Approve</button>
+                        <button class="btn btn-danger btn-sm" onclick="resolvePending('reply', ${pr.id}, 'delete')">🗑 Delete</button>
+                    </div>
+                </div>`).join('')}
+            </div>
         </div>
         <script>
         function showTab(which) {
             document.getElementById('sectionThreads').style.display = which === 'threads' ? '' : 'none';
             document.getElementById('sectionReplies').style.display = which === 'replies' ? '' : 'none';
             document.getElementById('sectionReports').style.display = which === 'reports' ? '' : 'none';
+            document.getElementById('sectionPending').style.display = which === 'pending' ? '' : 'none';
             document.getElementById('tabThreads').style.fontWeight = which === 'threads' ? '700' : '400';
             document.getElementById('tabReplies').style.fontWeight = which === 'replies' ? '700' : '400';
             document.getElementById('tabReports').style.fontWeight = which === 'reports' ? '700' : '400';
+            document.getElementById('tabPending').style.fontWeight = which === 'pending' ? '700' : '400';
+        }
+        async function resolvePending(type, id, action) {
+            try {
+                const r = await fetch('/api/mod/pending/resolve', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ type, id, action }) });
+                const d = await r.json();
+                if (d.success) location.reload(); else showToast(d.error || 'Action failed', 'error');
+            } catch { showToast('Action failed', 'error'); }
         }
         async function handleReport(id, action) {
             if (action === 'delete' && !confirm('Delete the reported content? This cannot be undone.')) return;
@@ -1703,6 +1768,38 @@ app.get('/moderate', requireRole(['moderator', 'admin']), async (req, res) => {
     console.error('Moderation error:', error);
     res.status(500).send('Server Error');
 }
+});
+
+// Banned words — admin management
+app.post('/api/admin/words', requireRole(['admin']), async (req, res) => {
+    try {
+        const { word, action } = await req.json();
+        const w = (word || '').toString().trim().toLowerCase();
+        if (!w || w.length > 100) return res.status(400).json({ success: false, error: 'Word is required (max 100 chars)' });
+        if (!['block', 'moderate'].includes(action)) return res.status(400).json({ success: false, error: 'Action must be block or moderate' });
+        try {
+            await query('INSERT INTO banned_words (word, action) VALUES (?, ?)', [w, action]);
+        } catch (e) {
+            if (e.message.includes('Duplicate')) return res.status(400).json({ success: false, error: 'That word is already listed' });
+            throw e;
+        }
+        clearCache();
+        res.json({ success: true, message: `Added "${w}" (${action})` });
+    } catch (error) {
+        console.error('Add word error:', error);
+        res.status(500).json({ success: false, error: 'Failed to add word' });
+    }
+});
+
+app.delete('/api/admin/words/:id', requireRole(['admin']), async (req, res) => {
+    try {
+        await query('DELETE FROM banned_words WHERE id = ?', [parseInt(req.params.id)]);
+        clearCache();
+        res.json({ success: true });
+    } catch (error) {
+        console.error('Delete word error:', error);
+        res.status(500).json({ success: false, error: 'Failed to delete word' });
+    }
 });
 
 // Ban a user (admin only) — permanent or temporary
@@ -1758,6 +1855,7 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
     const [totalUsers] = await query(`SELECT COUNT(*) as c FROM users ${userWhere}`, searchParams);
     const userPages = Math.max(1, Math.ceil(totalUsers.c / perPage));
     const listedUsers = await query(`SELECT id, username, display_name, email, created_at, role, is_banned, banned_until, ban_reason FROM users ${userWhere} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...searchParams, perPage, (pageNum - 1) * perPage]);
+    const bannedWords = await query('SELECT id, word, action FROM banned_words ORDER BY word');
 
     const banStatus = u => u.banned_until ? `temp (until ${new Date(u.banned_until).toISOString().slice(0, 10)})` : 'permanent';
 
@@ -1817,7 +1915,42 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
         </div>
         ${paginationHtml}
     </div>
+    <div class="card" style="margin-top:2rem;padding:1.5rem">
+        <h2 style="font-size:1.25rem;font-weight:700;margin-bottom:0.5rem">Banned Words Filter</h2>
+        <p style="color:var(--text-muted);font-size:0.875rem;margin-bottom:1rem">Words marked <strong>Block</strong> are rejected outright when users post. Words marked <strong>Moderate</strong> allow the post through but place it in the moderation queue until a moderator approves it. Matching is case-insensitive and matches whole words.</p>
+        <form id="wordForm" onsubmit="event.preventDefault(); addWord()" style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:1rem">
+            <input id="wordInput" class="form-input" placeholder="Word or phrase" required style="width:220px">
+            <select id="wordAction" class="form-input" style="width:auto">
+                <option value="block">Block</option>
+                <option value="moderate">Send to moderation</option>
+            </select>
+            <button class="btn btn-ghost" type="submit">Add Word</button>
+        </form>
+        ${bannedWords.length === 0 ? '<div class="empty-state" style="padding:1rem">No words configured</div>' : `<div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+            ${bannedWords.map(w => `<span style="display:inline-flex;align-items:center;gap:0.4rem;padding:0.3rem 0.75rem;border:1px solid var(--border);border-radius:999px;font-size:0.85rem;background:var(--bg-secondary)">
+                <code>${escapeHtml(w.word)}</code>
+                <span style="font-size:0.7rem;font-weight:700;padding:0.1rem 0.45rem;border-radius:999px;color:white;background:${w.action === 'block' ? 'var(--danger)' : 'var(--warning)'}">${w.action === 'block' ? 'BLOCK' : 'MODERATE'}</span>
+                <button onclick="deleteWord(${w.id})" title="Remove" style="cursor:pointer;border:none;background:none;color:var(--text-muted);font-weight:700">×</button>
+            </span>`).join('')}
+        </div>`}
+    </div>
     <script>
+    async function addWord() {
+        const word = document.getElementById('wordInput').value;
+        const action = document.getElementById('wordAction').value;
+        try {
+            const r = await fetch('/api/admin/words', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ word, action }) });
+            const d = await r.json();
+            if (d.success) location.reload(); else showToast(d.error || 'Failed to add word', 'error');
+        } catch { showToast('Failed to add word', 'error'); }
+    }
+    async function deleteWord(id) {
+        try {
+            const r = await fetch('/api/admin/words/' + id, { method: 'DELETE' });
+            const d = await r.json();
+            if (d.success) location.reload(); else showToast(d.error || 'Failed to delete word', 'error');
+        } catch { showToast('Failed to delete word', 'error'); }
+    }
     async function banUser(id) {
         const daysStr = prompt('Ban duration in days (leave empty for PERMANENT ban):', '7');
         if (daysStr === null) return;
@@ -1887,6 +2020,21 @@ async function initDatabase() {
                 FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
         } catch (e) { console.error('Reports table warning:', e.message); }
+        try {
+            await pool.execute(`ALTER TABLE threads ADD COLUMN moderation_status ENUM('visible','pending') NOT NULL DEFAULT 'visible'`);
+        } catch (e) { /* exists */ }
+        try {
+            await pool.execute(`ALTER TABLE replies ADD COLUMN moderation_status ENUM('visible','pending') NOT NULL DEFAULT 'visible'`);
+        } catch (e) { /* exists */ }
+        try {
+            await pool.execute(`CREATE TABLE IF NOT EXISTS banned_words (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                word VARCHAR(100) NOT NULL,
+                action ENUM('block','moderate') NOT NULL DEFAULT 'block',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_word (word)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+        } catch (e) { console.error('banned_words table warning:', e.message); }
         console.log('✅ Database initialized');
 
         // Seed sample data if empty
