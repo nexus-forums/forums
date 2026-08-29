@@ -1833,6 +1833,77 @@ app.delete('/api/admin/words/:id', requireRole(['admin']), async (req, res) => {
     }
 });
 
+// Category management (admin only)
+app.post('/api/admin/categories', requireRole(['admin']), async (req, res) => {
+    try {
+        const { name, description, color, icon, sort_order, is_hidden } = await req.json();
+        const n = (name || '').toString().trim();
+        if (!n || n.length > 100) return res.status(400).json({ success: false, error: 'Name is required (max 100 chars)' });
+        let slug = slugify(n);
+        if (!slug) return res.status(400).json({ success: false, error: 'Name must contain at least one letter or number' });
+        const [dup] = await query('SELECT id FROM categories WHERE slug = ?', [slug]);
+        if (dup) slug = slug + '-' + Date.now().toString(36);
+        const sortOrder = parseInt(sort_order) || 0;
+        try {
+            const result = await query(
+                'INSERT INTO categories (name, slug, description, color, icon, sort_order, is_hidden) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                [n, slug, (description || '').toString().slice(0, 500) || null, /^#[0-9a-fA-F]{6}$/.test(color || '') ? color : '#6366f1', icon || 'message-circle', sortOrder, is_hidden ? 1 : 0]
+            );
+            res.json({ success: true, category: { id: result.insertId, name: n, slug }, message: `Category "${n}" created` });
+        } catch (e) {
+            if (e.message.includes('Duplicate')) return res.status(400).json({ success: false, error: 'A category with that slug already exists' });
+            throw e;
+        }
+    } catch (error) {
+        console.error('Create category error:', error);
+        res.status(500).json({ success: false, error: 'Failed to create category' });
+    }
+});
+
+app.patch('/api/admin/categories/:id', requireRole(['admin']), async (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const [cat] = await query('SELECT id, name FROM categories WHERE id = ?', [id]);
+        if (!cat) return res.status(404).json({ success: false, error: 'Category not found' });
+        const { name, description, color, icon, sort_order, is_hidden } = await req.json();
+        const updates = [];
+        const values = [];
+        if (name !== undefined) {
+            const n = (name || '').toString().trim();
+            if (!n || n.length > 100) return res.status(400).json({ success: false, error: 'Name is required (max 100 chars)' });
+            updates.push('name = ?', 'slug = ?');
+            values.push(n, slugify(n) || cat.id + '-category');
+        }
+        if (description !== undefined) { updates.push('description = ?'); values.push((description || '').toString().slice(0, 500) || null); }
+        if (color !== undefined && /^#[0-9a-fA-F]{6}$/.test(color)) { updates.push('color = ?'); values.push(color); }
+        if (icon !== undefined) { updates.push('icon = ?'); values.push(icon || 'message-circle'); }
+        if (sort_order !== undefined) { updates.push('sort_order = ?'); values.push(parseInt(sort_order) || 0); }
+        if (is_hidden !== undefined) { updates.push('is_hidden = ?'); values.push(is_hidden ? 1 : 0); }
+        if (updates.length === 0) return res.status(400).json({ success: false, error: 'Nothing to update' });
+        values.push(id);
+        await query(`UPDATE categories SET ${updates.join(', ')} WHERE id = ?`, values);
+        res.json({ success: true, message: `Category "${cat.name}" updated` });
+    } catch (error) {
+        console.error('Update category error:', error);
+        res.status(500).json({ success: false, error: 'Failed to update category' });
+    }
+});
+
+app.delete('/api/admin/categories/:id', requireRole(['admin']), async (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const [cat] = await query('SELECT id, name FROM categories WHERE id = ?', [id]);
+        if (!cat) return res.status(404).json({ success: false, error: 'Category not found' });
+        const [count] = await query('SELECT COUNT(*) as c FROM threads WHERE category_id = ?', [id]);
+        if (count.c > 0) return res.status(400).json({ success: false, error: `Cannot delete — ${count.c} thread(s) still in this category. Move or delete them first.` });
+        await query('DELETE FROM categories WHERE id = ?', [id]);
+        res.json({ success: true, message: `Category "${cat.name}" deleted` });
+    } catch (error) {
+        console.error('Delete category error:', error);
+        res.status(500).json({ success: false, error: 'Failed to delete category' });
+    }
+});
+
 // Ban a user (admin only) — permanent or temporary
 app.post('/api/admin/users/:id/ban', requireRole(['admin']), async (req, res) => {
     try {
@@ -1887,6 +1958,8 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
     const userPages = Math.max(1, Math.ceil(totalUsers.c / perPage));
     const listedUsers = await query(`SELECT id, username, display_name, email, created_at, role, is_banned, banned_until, ban_reason FROM users ${userWhere} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...searchParams, perPage, (pageNum - 1) * perPage]);
     const bannedWords = await query('SELECT id, word, action FROM banned_words ORDER BY word');
+    const categories = await query(`SELECT c.*, (SELECT COUNT(*) FROM threads WHERE category_id = c.id) as actual_threads FROM categories c ORDER BY c.sort_order, c.name`);
+    const iconOptions = ['message-circle', 'cpu', 'palette', 'gamepad-2', 'atom', 'leaf', 'life-buoy'];
 
     const banStatus = u => u.banned_until ? `temp (until ${new Date(u.banned_until).toISOString().slice(0, 10)})` : 'permanent';
 
@@ -1946,6 +2019,45 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
         </div>
         ${paginationHtml}
         <div class="card" style="margin-top:2rem;padding:1.5rem">
+            <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.5rem">
+                <h2 style="font-size:1.25rem;font-weight:700">Forum Categories</h2>
+                <button class="btn btn-ghost btn-sm" onclick="openCatModal()">＋ New Category</button>
+            </div>
+            <p style="color:var(--text-muted);font-size:0.875rem;margin-bottom:1rem">Hidden categories are invisible to regular users (existing direct links return 404). Categories with threads cannot be deleted.</p>
+            ${categories.map(c => `
+            <div class="thread-card" style="padding:0.85rem 1rem;align-items:center${c.is_hidden ? ';opacity:0.6' : ''}">
+                <span style="width:38px;height:38px;border-radius:var(--radius);display:inline-flex;align-items:center;justify-content:center;background:${c.color}20;color:${c.color};flex-shrink:0">${iconSvg(c.icon, 20)}</span>
+                <div class="thread-content" style="flex:1">
+                    <h4 style="margin:0">${escapeHtml(c.name)} ${c.is_hidden ? '<span style="background:var(--text-muted);color:white;padding:0.1rem 0.5rem;border-radius:var(--radius-sm);font-size:0.7rem;font-weight:700;margin-left:0.25rem">HIDDEN</span>' : ''}</h4>
+                    <div class="thread-meta"><span>/${escapeHtml(c.slug)}</span><span>${c.actual_threads} thread${c.actual_threads === 1 ? '' : 's'}</span><span>order ${c.sort_order}</span></div>
+                </div>
+                <div style="display:flex;gap:0.5rem;flex-shrink:0">
+                    <button class="btn btn-ghost btn-sm" onclick='openCatModal(${JSON.stringify({ id: c.id, name: c.name, description: c.description || '', color: c.color, icon: c.icon, sort_order: c.sort_order, is_hidden: !!c.is_hidden })})'>Edit</button>
+                    <button class="btn btn-ghost btn-sm" onclick="toggleCategory(${c.id}, ${c.is_hidden ? 0 : 1})">${c.is_hidden ? 'Show' : 'Hide'}</button>
+                    <button class="btn btn-danger btn-sm" onclick="deleteCategory(${c.id}, this)">🗑</button>
+                </div>
+            </div>`).join('')}
+        </div>
+        <div id="catModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center">
+            <div class="card" style="width:min(480px, 92vw);padding:1.5rem;max-height:90vh;overflow-y:auto">
+                <h3 id="catModalTitle" style="margin-bottom:1rem">New Category</h3>
+                <div style="display:flex;flex-direction:column;gap:0.75rem">
+                    <div><label style="font-size:0.8rem;font-weight:600">Name</label><input id="catName" class="form-input" maxlength="100" required></div>
+                    <div><label style="font-size:0.8rem;font-weight:600">Description</label><textarea id="catDescription" class="form-textarea" rows="2" maxlength="500"></textarea></div>
+                    <div style="display:flex;gap:0.75rem">
+                        <div style="flex:1"><label style="font-size:0.8rem;font-weight:600">Color</label><input id="catColor" type="color" class="form-input" style="height:2.5rem;padding:0.25rem" value="#6366f1"></div>
+                        <div style="flex:1"><label style="font-size:0.8rem;font-weight:600">Icon</label><select id="catIcon" class="form-input">${iconOptions.map(i => `<option value="${i}">${i}</option>`).join('')}</select></div>
+                        <div style="width:90px"><label style="font-size:0.8rem;font-weight:600">Order</label><input id="catSort" type="number" class="form-input" value="0"></div>
+                    </div>
+                    <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.875rem"><input type="checkbox" id="catHidden" style="width:16px;height:16px"> Hidden from users</label>
+                </div>
+                <div style="display:flex;gap:0.5rem;justify-content:flex-end;margin-top:1.25rem">
+                    <button class="btn btn-ghost" onclick="closeCatModal()">Cancel</button>
+                    <button class="btn btn-primary" id="catSaveBtn" onclick="saveCategory()">Save</button>
+                </div>
+            </div>
+        </div>
+        <div class="card" style="margin-top:2rem;padding:1.5rem">
             <h2 style="font-size:1.25rem;font-weight:700;margin-bottom:0.5rem">Banned Words Filter</h2>
             <p style="color:var(--text-muted);font-size:0.875rem;margin-bottom:1rem">Words marked <strong>Block</strong> are rejected outright when users post. Words marked <strong>Moderate</strong> allow the post through but place it in the moderation queue until a moderator approves it. Matching is case-insensitive and matches whole words.</p>
         <form id="wordForm" onsubmit="event.preventDefault(); addWord()" style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:1rem">
@@ -1966,6 +2078,53 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
         </div>
     </div>
     <script>
+    let editingCategoryId = null;
+    function openCatModal(cat) {
+        editingCategoryId = cat ? cat.id : null;
+        document.getElementById('catModalTitle').textContent = cat ? ('Edit Category: ' + cat.name) : 'New Category';
+        document.getElementById('catName').value = cat ? cat.name : '';
+        document.getElementById('catDescription').value = cat ? cat.description : '';
+        document.getElementById('catColor').value = cat ? cat.color : '#6366f1';
+        document.getElementById('catIcon').value = cat ? cat.icon : 'message-circle';
+        document.getElementById('catSort').value = cat ? cat.sort_order : 0;
+        document.getElementById('catHidden').checked = cat ? cat.is_hidden : false;
+        document.getElementById('catModal').style.display = 'flex';
+    }
+    function closeCatModal() { document.getElementById('catModal').style.display = 'none'; }
+    async function saveCategory() {
+        const payload = {
+            name: document.getElementById('catName').value,
+            description: document.getElementById('catDescription').value,
+            color: document.getElementById('catColor').value,
+            icon: document.getElementById('catIcon').value,
+            sort_order: parseInt(document.getElementById('catSort').value) || 0,
+            is_hidden: document.getElementById('catHidden').checked
+        };
+        try {
+            const r = await fetch('/api/admin/categories' + (editingCategoryId ? '/' + editingCategoryId : ''), {
+                method: editingCategoryId ? 'PATCH' : 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const d = await r.json();
+            if (d.success) location.reload(); else showToast(d.error || 'Failed to save', 'error');
+        } catch { showToast('Failed to save category', 'error'); }
+    }
+    async function toggleCategory(id, hide) {
+        try {
+            const r = await fetch('/api/admin/categories/' + id, { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ is_hidden: !!hide }) });
+            const d = await r.json();
+            if (d.success) location.reload(); else showToast(d.error || 'Failed', 'error');
+        } catch { showToast('Failed to update category', 'error'); }
+    }
+    async function deleteCategory(id, btn) {
+        if (!btn.dataset.armed) { btn.dataset.armed = '1'; btn.textContent = 'Confirm?'; setTimeout(() => { btn.textContent = '🗑'; delete btn.dataset.armed; }, 3000); return; }
+        try {
+            const r = await fetch('/api/admin/categories/' + id, { method: 'DELETE' });
+            const d = await r.json();
+            if (d.success) location.reload(); else showToast(d.error || 'Failed to delete', 'error');
+        } catch { showToast('Failed to delete category', 'error'); }
+    }
     async function addWord() {
         const word = document.getElementById('wordInput').value;
         const action = document.getElementById('wordAction').value;
