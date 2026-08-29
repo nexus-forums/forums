@@ -849,17 +849,27 @@ app.get('/u/:username', async (req, res) => {
                 </div>
             </div>
             <div class="tabs">
-                <button class="tab active">Discussions</button>
-                <button class="tab">Replies</button>
+                <button class="tab active" id="tabDiscussions" onclick="showProfileTab('discussions')">Discussions</button>
+                <button class="tab" id="tabReplies" onclick="showProfileTab('replies')">Replies</button>
             </div>
-            <div style="display:flex;flex-direction:column;gap:0.75rem">
+            <div id="sectionDiscussions" style="display:flex;flex-direction:column;gap:0.75rem">
                 ${threadList || '<div class="empty-state"><p>No discussions yet.</p></div>'}
             </div>
-            <h2 style="margin-top:2rem;margin-bottom:1rem;font-size:1.25rem;font-weight:700">Recent Replies</h2>
-            <div style="display:flex;flex-direction:column;gap:0.75rem">
-                ${replyList || '<div class="empty-state"><p>No replies yet.</p></div>'}
+            <div id="sectionReplies" style="display:none;margin-top:2rem">
+                <h2 style="margin-top:0;margin-bottom:1rem;font-size:1.25rem;font-weight:700">Recent Replies</h2>
+                <div style="display:flex;flex-direction:column;gap:0.75rem">
+                    ${replyList || '<div class="empty-state"><p>No replies yet.</p></div>'}
+                </div>
             </div>
-        </div>`;
+        </div>
+        <script>
+        function showProfileTab(which) {
+            document.getElementById('sectionDiscussions').style.display = which === 'discussions' ? 'flex' : 'none';
+            document.getElementById('sectionReplies').style.display = which === 'replies' ? 'block' : 'none';
+            document.getElementById('tabDiscussions').classList.toggle('active', which === 'discussions');
+            document.getElementById('tabReplies').classList.toggle('active', which === 'replies');
+        }
+        </script>`;
 
         res.header('Content-Type', 'text/html');
         res.send(page(`${user.display_name || user.username}`, body, req.user));
