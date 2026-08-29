@@ -1194,7 +1194,8 @@ app.get('/messages', authenticate, async (req, res) => {
                     </div>
                     <div class="form-group">
                         <label class="form-label" for="msgContent">Message</label>
-                        <textarea class="form-textarea" id="msgContent" rows="4" required placeholder="Write your message..."></textarea>
+                        <textarea class="form-textarea" id="msgContent" rows="4" required placeholder="Write your message... Markdown supported."></textarea>
+                        <span class="form-hint">Supports Markdown formatting</span>
                     </div>
                     <button type="submit" class="btn btn-primary">Send Message</button>
                 </form>
@@ -1255,7 +1256,7 @@ app.get('/messages/:id', authenticate, async (req, res) => {
                         <time>${timeAgo(m.created_at)}</time>
                     </div>
                 </div>
-                <div class="post-content" style="white-space:pre-wrap">${escapeHtml(m.content)}</div>
+                <div class="post-content markdown-body">${renderMarkdown(m.content)}</div>
             </div>
         `).join('');
 
@@ -1271,7 +1272,8 @@ app.get('/messages/:id', authenticate, async (req, res) => {
             <div style="display:flex;flex-direction:column;gap:0.75rem;margin-bottom:1.5rem">${msgList}</div>
             <div class="reply-box">
                 <form id="replyMessageForm">
-                    <textarea id="replyMsgContent" class="form-textarea" rows="3" placeholder="Write a message..." required></textarea>
+                    <textarea id="replyMsgContent" class="form-textarea" rows="3" placeholder="Write a message... Markdown supported." required></textarea>
+                    <span class="form-hint">Supports Markdown formatting</span>
                     <div style="margin-top:0.75rem;text-align:right"><button type="submit" class="btn btn-primary">Send</button></div>
                 </form>
             </div>
@@ -1297,6 +1299,81 @@ app.get('/messages/:id', authenticate, async (req, res) => {
         res.status(500).send('Server Error');
     }
 });
+
+// Static info pages
+const infoPages = {
+    '/about': {
+        title: 'About',
+        html: `
+        <h2>About Nexus</h2>
+        <p>Nexus is a community forum for developers, makers, and curious minds. It's a place to share projects, ask questions, debate technology, and hang out with people who care about the same things you do.</p>
+        <p>Built with Node.js and Hyper-Express, the forum is lightweight, fast, and entirely self-hosted.</p>`
+    },
+    '/guidelines': {
+        title: 'Community Guidelines',
+        html: `
+        <h2>Community Guidelines</h2>
+        <ul>
+            <li><strong>Be respectful.</strong> Disagree with ideas, not people. Personal attacks, harassment, and hate speech are not tolerated.</li>
+            <li><strong>Stay on topic.</strong> Post in the appropriate category and keep threads focused.</li>
+            <li><strong>No spam.</strong> Self-promotion is fine when relevant, but drive-by advertising will be removed.</li>
+            <li><strong>Respect privacy.</strong> Don't post other people's personal information without consent.</li>
+            <li><strong>Use Markdown.</strong> Format your posts with Markdown for readability — code blocks, quotes, and lists all work.</li>
+        </ul>`
+    },
+    '/privacy': {
+        title: 'Privacy Policy',
+        html: `
+        <h2>Privacy Policy</h2>
+        <p>We collect only the information needed to run this forum: your username, email address, password (stored as a bcrypt hash), and anything you choose to add to your profile.</p>
+        <ul>
+            <li>We do not sell or share your personal data with third parties.</li>
+            <li>Email addresses are never displayed publicly.</li>
+            <li>Private messages are visible only to conversation participants.</li>
+            <li>You may request deletion of your account and its data at any time by contacting an administrator.</li>
+        </ul>`
+    },
+    '/api': {
+        title: 'API',
+        html: `
+        <h2>Nexus API</h2>
+        <p>All endpoints accept and return JSON. Authenticate by sending your session cookie, or use <code>Authorization: Bearer &lt;token&gt;</code> where tokens are issued at login.</p>
+        <h3>Authentication</h3>
+        <table><thead><tr><th>Method</th><th>Endpoint</th><th>Description</th></tr></thead><tbody>
+        <tr><td>POST</td><td><code>/api/auth/register</code></td><td>Create an account</td></tr>
+        <tr><td>POST</td><td><code>/api/auth/login</code></td><td>Log in, returns a token</td></tr>
+        <tr><td>GET</td><td><code>/api/auth/me</code></td><td>Current user profile</td></tr>
+        <tr><td>PATCH</td><td><code>/api/auth/me</code></td><td>Update profile</td></tr>
+        <tr><td>POST</td><td><code>/api/auth/password</code></td><td>Change password</td></tr>
+        </tbody></table>
+        <h3>Threads &amp; replies</h3>
+        <table><thead><tr><th>Method</th><th>Endpoint</th><th>Description</th></tr></thead><tbody>
+        <tr><td>GET</td><td><code>/api/threads</code></td><td>List threads</td></tr>
+        <tr><td>POST</td><td><code>/api/threads</code></td><td>Create a thread</td></tr>
+        <tr><td>GET</td><td><code>/api/threads/:id/raw</code></td><td>Raw thread content</td></tr>
+        <tr><td>PATCH</td><td><code>/api/threads/:id</code></td><td>Edit a thread</td></tr>
+        <tr><td>POST</td><td><code>/api/threads/:id/replies</code></td><td>Reply to a thread</td></tr>
+        <tr><td>PATCH</td><td><code>/api/replies/:id</code></td><td>Edit a reply</td></tr>
+        </tbody></table>
+        <h3>Messages</h3>
+        <table><thead><tr><th>Method</th><th>Endpoint</th><th>Description</th></tr></thead><tbody>
+        <tr><td>GET</td><td><code>/api/messages</code></td><td>List conversations</td></tr>
+        <tr><td>POST</td><td><code>/api/messages</code></td><td>Send a message</td></tr>
+        <tr><td>POST</td><td><code>/api/messages/:id</code></td><td>Reply in a conversation</td></tr>
+        </tbody></table>`
+    }
+};
+
+for (const [route, p] of Object.entries(infoPages)) {
+    app.get(route, async (req, res) => {
+        const body = `<div class="container" style="padding-top:2rem;max-width:800px">
+            <div class="thread-header"><h1>${p.title}</h1></div>
+            <div class="post-content markdown-body" style="padding:0">${p.html}</div>
+        </div>`;
+        res.header('Content-Type', 'text/html');
+        res.send(page(p.title, body, req.user));
+    });
+}
 
 // API: send a new message (starts or continues a conversation)
 app.post('/api/messages', authenticate, async (req, res) => {

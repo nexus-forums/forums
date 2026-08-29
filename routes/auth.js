@@ -171,6 +171,11 @@ router.patch('/me', requireAuth, async (req, res) => {
         }
         if (avatar !== undefined) {
             if (avatar && avatar.length > 1000) return res.status(400).json({ success: false, error: 'Avatar URL/data too long (max 1000)' });
+            if (avatar) {
+                const isDataImage = /^data:image\/(png|jpe?g|gif|webp|svg\+xml);base64,[a-z0-9+/=]+$/i.test(avatar);
+                const isHttpUrl = /^https?:\/\/.+/i.test(avatar);
+                if (!isDataImage && !isHttpUrl) return res.status(400).json({ success: false, error: 'Avatar must be a valid http(s) URL or a base64 image data URI' });
+            }
             updates.push('avatar = ?');
             values.push(avatar || generateAvatar(req.user.username));
         }
