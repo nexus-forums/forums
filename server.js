@@ -428,6 +428,7 @@ const threadPageHandler = async (req, res) => {
                             ${modActions}
                             ${deleteAction}
                             ${req.user && !(isAuthor && !isThread) && !isMod ? `<button onclick="reportPost('${isThread ? 'thread' : 'reply'}', ${p.id})" title="Report">⚑</button>` : ''}
+                            ${req.user && !isThread ? `<button onclick="quotePost(${p.id}, this)" data-author="${escapeHtml(p.username)}" title="Quote">❝</button>` : ''}
                         </div>
                     </div>
                     <div class="post-content markdown-body">${renderMarkdown(p.content)}</div>
@@ -458,6 +459,7 @@ const threadPageHandler = async (req, res) => {
                         <button type="button" data-action="bold">B</button>
                         <button type="button" data-action="italic">I</button>
                         <button type="button" data-action="link">🔗</button>
+                        <button type="button" data-action="image">🖼</button>
                         <button type="button" data-action="code">&lt;/&gt;</button>
                         <button type="button" data-action="quote">"</button>
                     </div>

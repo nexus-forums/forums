@@ -160,6 +160,25 @@
         if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
     };
 
+    // Quote a reply into the reply composer (used by the ❝ button on thread pages)
+    window.quotePost = async function(id, btn) {
+        try {
+            const r = await fetch('/api/replies/' + id + '/raw');
+            const d = await r.json();
+            if (!d.success || !d.content) return showToast('Cannot quote post', 'error');
+            const author = (btn && btn.dataset.author) || 'someone';
+            const nl = String.fromCharCode(10);
+            const quoted = d.content.split(nl).map(line => '> ' + line).join(nl);
+            const block = '**@' + author + ' wrote:**' + nl + nl + quoted + nl + nl;
+            const ta = document.getElementById('replyContent');
+            if (!ta) return showToast('Reply box not found', 'error');
+            const existing = ta.value;
+            ta.value = existing ? existing.trimEnd() + nl + nl + block : block;
+            ta.focus();
+            ta.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        } catch { showToast('Cannot quote post', 'error'); }
+    };
+
     // Editor toolbar
     document.querySelectorAll('.editor-toolbar').forEach(toolbar => {
         const textarea = toolbar.nextElementSibling;
