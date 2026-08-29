@@ -46,6 +46,26 @@ app.use((req, res, next) => {
     next();
 });
 
+// CSRF protection (double-submit cookie pattern)
+app.use((req, res, next) => {
+    if (!req.cookies.csrf) {
+        const token = require('crypto').randomBytes(32).toString('hex');
+        req.cookies.csrf = token;
+        res.header('Set-Cookie', `csrf=${token}; Path=/; SameSite=Lax`);
+    }
+    req.csrfToken = req.cookies.csrf;
+    next();
+});
+app.use((req, res, next) => {
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && req.path.startsWith('/api/')) {
+        const header = req.headers['x-csrf-token'] || req.headers['X-CSRF-Token'];
+        if (!header || header !== req.cookies.csrf) {
+            return res.status(403).json({ success: false, error: 'Invalid or missing CSRF token' });
+        }
+    }
+    next();
+});
+
 // Auth middleware
 app.use(authenticate);
 

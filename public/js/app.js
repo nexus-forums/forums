@@ -2,6 +2,20 @@
 (function() {
     'use strict';
 
+    // CSRF: attach double-submit token header to all mutating API requests
+    const origFetch = window.fetch;
+    window.fetch = function(input, init = {}) {
+        const method = ((init && init.method) || 'GET').toUpperCase();
+        if (method !== 'GET' && method !== 'HEAD') {
+            const m = document.cookie.match(/(?:^|; )csrf=([^;]*)/);
+            if (m) {
+                init.headers = new Headers(init.headers || {});
+                if (!init.headers.has('X-CSRF-Token')) init.headers.set('X-CSRF-Token', m[1]);
+            }
+        }
+        return origFetch.call(this, input, init);
+    };
+
     // Theme toggle
     const themeToggle = document.getElementById('themeToggle');
     if (themeToggle) {
