@@ -2118,7 +2118,7 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
                     </div>
                     ${u.role !== 'admin' && u.id !== req.user.id ? `
                     <div style="display:flex;gap:0.5rem;flex-shrink:0">
-                        <button class="btn btn-ghost btn-sm" onclick="banUser(${u.id}, ${u.is_banned ? 1 : 0})">${u.is_banned ? 'Modify Ban' : 'Ban'}</button>
+                        <button class="btn btn-ghost btn-sm" onclick="openBanModal(${u.id}, '${escapeHtml(u.display_name || u.username).replace(/'/g, "\\'")}', '${u.username}', ${u.is_banned ? 1 : 0})">${u.is_banned ? 'Modify Ban' : 'Ban'}</button>
                         ${u.is_banned ? `<button class=\"btn btn-ghost btn-sm\" onclick=\"unbanUser(${u.id})\">Unban</button>` : ''}
                     </div>` : ''}
                 </div>
@@ -2172,6 +2172,33 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
                 <button class="btn btn-danger btn-sm" onclick="deleteGroup(${g.id}, this)">🗑</button>
             </div>
         </div>`).join('')}
+    </div>
+    <div id="banModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center" onclick="if(event.target===this)closeBanModal()">
+        <div class="card" style="width:min(440px, 92vw);padding:1.5rem;border-top:3px solid var(--danger)">
+            <h3 id="banModalTitle" style="margin-bottom:0.25rem;font-size:1.15rem;font-weight:700">Ban User</h3>
+            <p id="banModalSub" style="color:var(--text-muted);font-size:0.85rem;margin-bottom:1.25rem"></p>
+            <div style="display:flex;flex-direction:column;gap:1rem">
+                <div>
+                    <label style="font-size:0.8rem;font-weight:600;display:block;margin-bottom:0.4rem">Duration</label>
+                    <div style="display:flex;gap:0.4rem;flex-wrap:wrap;margin-bottom:0.6rem">
+                        <button type="button" class="btn btn-ghost btn-sm ban-preset" data-days="1">1 day</button>
+                        <button type="button" class="btn btn-ghost btn-sm ban-preset" data-days="3">3 days</button>
+                        <button type="button" class="btn btn-ghost btn-sm ban-preset" data-days="7">1 week</button>
+                        <button type="button" class="btn btn-ghost btn-sm ban-preset" data-days="30">1 month</button>
+                        <button type="button" class="btn btn-ghost btn-sm ban-preset ban-preset-perm" data-days="">Permanent</button>
+                    </div>
+                    <input id="banDays" type="number" min="1" class="form-input" placeholder="Custom days (empty = permanent)" style="width:100%">
+                </div>
+                <div>
+                    <label style="font-size:0.8rem;font-weight:600;display:block;margin-bottom:0.4rem">Reason <span style="font-weight:400;color:var(--text-muted)">(shown to the user at login)</span></label>
+                    <textarea id="banReason" class="form-textarea" rows="2" maxlength="500" placeholder="e.g. Repeated rule violations"></textarea>
+                </div>
+            </div>
+            <div style="display:flex;gap:0.5rem;justify-content:flex-end;margin-top:1.25rem">
+                <button class="btn btn-ghost" onclick="closeBanModal()">Cancel</button>
+                <button class="btn btn-danger" id="banConfirmBtn" onclick="confirmBan()">🚫 Ban User</button>
+            </div>
+        </div>
     </div>
     <div id="catModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center">
             <div class="card" style="width:min(480px, 92vw);padding:1.5rem;max-height:90vh;overflow-y:auto">
@@ -2336,14 +2363,36 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
             if (d.success) location.reload(); else showToast(d.error || 'Failed to delete word', 'error');
         } catch { showToast('Failed to delete word', 'error'); }
     }
-    async function banUser(id) {
-        const daysStr = prompt('Ban duration in days (leave empty for PERMANENT ban):', '7');
-        if (daysStr === null) return;
-        const reason = prompt('Reason (optional):') || '';
-        const payload = { reason };
-        if (daysStr.trim() !== '') payload.days = parseInt(daysStr);
+    let banningUserId = null;
+    function openBanModal(id, displayName, username, alreadyBanned) {
+        banningUserId = id;
+        document.getElementById('banModalTitle').textContent = alreadyBanned ? 'Modify Ban' : 'Ban User';
+        document.getElementById('banModalSub').innerHTML = 'You are ' + (alreadyBanned ? 'modifying the ban for' : 'banning') + ' <strong>@' + username + '</strong>' + (displayName !== username ? ' (' + displayName + ')' : '');
+        document.getElementById('banDays').value = '7';
+        document.getElementById('banReason').value = '';
+        document.getElementById('banConfirmBtn').textContent = '🚫 ' + (alreadyBanned ? 'Update Ban' : 'Ban User');
+        document.querySelectorAll('.ban-preset').forEach(b => b.classList.remove('ban-preset-active'));
+        document.querySelector('.ban-preset[data-days="7"]').classList.add('ban-preset-active');
+        document.getElementById('banModal').style.display = 'flex';
+    }
+    function closeBanModal() { document.getElementById('banModal').style.display = 'none'; }
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest('.ban-preset');
+        if (!btn) return;
+        document.querySelectorAll('.ban-preset').forEach(b => b.classList.remove('ban-preset-active'));
+        btn.classList.add('ban-preset-active');
+        document.getElementById('banDays').value = btn.dataset.days;
+    });
+    async function confirmBan() {
+        const daysStr = document.getElementById('banDays').value.trim();
+        const payload = { reason: document.getElementById('banReason').value };
+        if (daysStr !== '') {
+            const n = parseInt(daysStr);
+            if (isNaN(n) || n < 1) return showToast('Duration must be a positive number of days', 'error');
+            payload.days = n;
+        }
         try {
-            const r = await fetch('/api/admin/users/' + id + '/ban', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+            const r = await fetch('/api/admin/users/' + banningUserId + '/ban', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
             const d = await r.json();
             if (d.success) location.reload(); else showToast(d.error || 'Ban failed', 'error');
         } catch { showToast('Ban failed', 'error'); }

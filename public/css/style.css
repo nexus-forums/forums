@@ -489,3 +489,6 @@ html.light .sun { display: none; }
 .toast.error { background: rgba(239, 68, 68, 0.9); }
 .toast.info { background: rgba(59, 130, 246, 0.9); }
 @keyframes slideInRight { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+
+/* Ban modal preset buttons */
+.ban-preset-active { background: var(--danger) !important; color: white !important; border-color: var(--danger) !important; }
