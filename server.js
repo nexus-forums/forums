@@ -48,6 +48,13 @@ app.use((req, res, next) => {
     next();
 });
 
+// Security headers
+app.use((req, res, next) => {
+    res.header('X-Content-Type-Options', 'nosniff');
+    res.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+});
+
 // CSRF protection (double-submit cookie pattern)
 app.use((req, res, next) => {
     if (!req.cookies.csrf) {
