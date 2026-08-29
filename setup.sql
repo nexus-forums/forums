@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS categories (
     thread_count INT DEFAULT 0,
     post_count INT DEFAULT 0,
     is_hidden BOOLEAN DEFAULT FALSE,
+    moderate_all_posts BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (parent_id) REFERENCES categories(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

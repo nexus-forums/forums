@@ -154,6 +154,10 @@ router.post('/api/threads', requireAuth, async (req, res) => {
                 return res.status(400).json({ success: false, error: `Your post contains banned word(s): ${filterResult.blocked.join(', ')}` });
             }
             pending = filterResult.flagged.length > 0;
+            if (!pending) {
+                const [cat] = await query('SELECT moderate_all_posts FROM categories WHERE id = ?', [category_id]);
+                pending = !!(cat && cat.moderate_all_posts);
+            }
         }
 
         const slug = slugify(title);
@@ -192,7 +196,8 @@ router.post('/api/threads/:id/replies', requireAuth, async (req, res) => {
             return res.status(400).json({ success: false, error: 'Reply content is required' });
         }
 
-        const [threadCheck] = await query('SELECT id, is_locked, user_id FROM threads WHERE id = ?', [threadId]);
+        const [threadCheck] = await query(`SELECT t.id, t.is_locked, t.user_id, c.moderate_all_posts
+            FROM threads t JOIN categories c ON c.id = t.category_id WHERE t.id = ?`, [threadId]);
         if (!threadCheck) return res.status(404).json({ success: false, error: 'Thread not found' });
         if (threadCheck.is_locked) return res.status(403).json({ success: false, error: 'Thread is locked' });
 
@@ -203,7 +208,7 @@ router.post('/api/threads/:id/replies', requireAuth, async (req, res) => {
             if (filterResult.blocked.length > 0) {
                 return res.status(400).json({ success: false, error: `Your reply contains banned word(s): ${filterResult.blocked.join(', ')}` });
             }
-            pending = filterResult.flagged.length > 0;
+            pending = filterResult.flagged.length > 0 || !!threadCheck.moderate_all_posts;
         }
 
         const result = await transaction(async (conn) => {
@@ -592,7 +597,8 @@ router.post('/api/mod/bulk', requireRole(['moderator', 'admin']), async (req, re
 // Edit thread (title/content) — author or mod
 router.patch('/api/threads/:id', requireAuth, async (req, res) => {
     try {
-        const [thread] = await query('SELECT user_id FROM threads WHERE id = ?', [req.params.id]);
+        const [thread] = await query(`SELECT t.user_id, c.moderate_all_posts
+            FROM threads t JOIN categories c ON c.id = t.category_id WHERE t.id = ?`, [req.params.id]);
         if (!thread) return res.status(404).json({ success: false, error: 'Thread not found' });
         if (thread.user_id !== req.user.id && !['moderator', 'admin'].includes(req.user.role)) {
             return res.status(403).json({ success: false, error: 'Not allowed' });
@@ -617,7 +623,7 @@ router.patch('/api/threads/:id', requireAuth, async (req, res) => {
                 if (filterResult.blocked.length > 0) {
                     return res.status(400).json({ success: false, error: `Your post contains banned word(s): ${filterResult.blocked.join(', ')}` });
                 }
-                if (filterResult.flagged.length > 0) {
+                if (filterResult.flagged.length > 0 || !!thread.moderate_all_posts) {
                     updates.push('moderation_status = ?');
                     values.push('pending');
                 }
@@ -639,7 +645,8 @@ router.patch('/api/threads/:id', requireAuth, async (req, res) => {
 // Edit reply content — author or mod
 router.patch('/api/replies/:id', requireAuth, async (req, res) => {
     try {
-        const [reply] = await query('SELECT user_id FROM replies WHERE id = ?', [req.params.id]);
+        const [reply] = await query(`SELECT r.user_id, r.thread_id, r.moderation_status, c.moderate_all_posts
+            FROM replies r JOIN threads t ON t.id = r.thread_id JOIN categories c ON c.id = t.category_id WHERE r.id = ?`, [req.params.id]);
         if (!reply) return res.status(404).json({ success: false, error: 'Reply not found' });
         if (reply.user_id !== req.user.id && !['moderator', 'admin'].includes(req.user.role)) {
             return res.status(403).json({ success: false, error: 'Not allowed' });
@@ -655,7 +662,7 @@ router.patch('/api/replies/:id', requireAuth, async (req, res) => {
             if (filterResult.blocked.length > 0) {
                 return res.status(400).json({ success: false, error: `Your reply contains banned word(s): ${filterResult.blocked.join(', ')}` });
             }
-            pendingFlag = filterResult.flagged.length > 0;
+            pendingFlag = filterResult.flagged.length > 0 || !!reply.moderate_all_posts;
         }
         if (pendingFlag) {
             await query('UPDATE replies SET content = ?, edited_at = NOW(), moderation_status = \'pending\' WHERE id = ?', [content.trim(), req.params.id]);

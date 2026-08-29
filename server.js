@@ -1836,7 +1836,7 @@ app.delete('/api/admin/words/:id', requireRole(['admin']), async (req, res) => {
 // Category management (admin only)
 app.post('/api/admin/categories', requireRole(['admin']), async (req, res) => {
     try {
-        const { name, description, color, icon, sort_order, is_hidden } = await req.json();
+        const { name, description, color, icon, sort_order, is_hidden, moderate_all_posts } = await req.json();
         const n = (name || '').toString().trim();
         if (!n || n.length > 100) return res.status(400).json({ success: false, error: 'Name is required (max 100 chars)' });
         let slug = slugify(n);
@@ -1846,8 +1846,8 @@ app.post('/api/admin/categories', requireRole(['admin']), async (req, res) => {
         const sortOrder = parseInt(sort_order) || 0;
         try {
             const result = await query(
-                'INSERT INTO categories (name, slug, description, color, icon, sort_order, is_hidden) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [n, slug, (description || '').toString().slice(0, 500) || null, /^#[0-9a-fA-F]{6}$/.test(color || '') ? color : '#6366f1', icon || 'message-circle', sortOrder, is_hidden ? 1 : 0]
+                'INSERT INTO categories (name, slug, description, color, icon, sort_order, is_hidden, moderate_all_posts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                [n, slug, (description || '').toString().slice(0, 500) || null, /^#[0-9a-fA-F]{6}$/.test(color || '') ? color : '#6366f1', icon || 'message-circle', sortOrder, is_hidden ? 1 : 0, moderate_all_posts ? 1 : 0]
             );
             res.json({ success: true, category: { id: result.insertId, name: n, slug }, message: `Category "${n}" created` });
         } catch (e) {
@@ -1865,7 +1865,7 @@ app.patch('/api/admin/categories/:id', requireRole(['admin']), async (req, res) 
         const id = parseInt(req.params.id);
         const [cat] = await query('SELECT id, name FROM categories WHERE id = ?', [id]);
         if (!cat) return res.status(404).json({ success: false, error: 'Category not found' });
-        const { name, description, color, icon, sort_order, is_hidden } = await req.json();
+        const { name, description, color, icon, sort_order, is_hidden, moderate_all_posts } = await req.json();
         const updates = [];
         const values = [];
         if (name !== undefined) {
@@ -1879,6 +1879,7 @@ app.patch('/api/admin/categories/:id', requireRole(['admin']), async (req, res) 
         if (icon !== undefined) { updates.push('icon = ?'); values.push(icon || 'message-circle'); }
         if (sort_order !== undefined) { updates.push('sort_order = ?'); values.push(parseInt(sort_order) || 0); }
         if (is_hidden !== undefined) { updates.push('is_hidden = ?'); values.push(is_hidden ? 1 : 0); }
+        if (moderate_all_posts !== undefined) { updates.push('moderate_all_posts = ?'); values.push(moderate_all_posts ? 1 : 0); }
         if (updates.length === 0) return res.status(400).json({ success: false, error: 'Nothing to update' });
         values.push(id);
         await query(`UPDATE categories SET ${updates.join(', ')} WHERE id = ?`, values);
@@ -2029,7 +2030,7 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
                 <span style="width:38px;height:38px;border-radius:var(--radius);display:inline-flex;align-items:center;justify-content:center;background:${c.color}20;color:${c.color};flex-shrink:0">${iconSvg(c.icon, 20)}</span>
                 <div class="thread-content" style="flex:1">
                     <h4 style="margin:0">${escapeHtml(c.name)} ${c.is_hidden ? '<span style="background:var(--text-muted);color:white;padding:0.1rem 0.5rem;border-radius:var(--radius-sm);font-size:0.7rem;font-weight:700;margin-left:0.25rem">HIDDEN</span>' : ''}</h4>
-                    <div class="thread-meta"><span>/${escapeHtml(c.slug)}</span><span>${c.actual_threads} thread${c.actual_threads === 1 ? '' : 's'}</span><span>order ${c.sort_order}</span></div>
+                    <div class="thread-meta"><span>/${escapeHtml(c.slug)}</span><span>${c.actual_threads} thread${c.actual_threads === 1 ? '' : 's'}</span><span>order ${c.sort_order}</span>${c.moderate_all_posts ? '<span style="background:var(--warning);color:white;padding:0.1rem 0.5rem;border-radius:var(--radius-sm);font-size:0.7rem;font-weight:700">ALL POSTS MODERATED</span>' : ''}</div>
                 </div>
                 <div style="display:flex;gap:0.5rem;flex-shrink:0">
                     <button class="btn btn-ghost btn-sm" onclick='openCatModal(${JSON.stringify({ id: c.id, name: c.name, description: c.description || '', color: c.color, icon: c.icon, sort_order: c.sort_order, is_hidden: !!c.is_hidden })})'>Edit</button>
@@ -2050,6 +2051,7 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
                         <div style="width:90px"><label style="font-size:0.8rem;font-weight:600">Order</label><input id="catSort" type="number" class="form-input" value="0"></div>
                     </div>
                     <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.875rem"><input type="checkbox" id="catHidden" style="width:16px;height:16px"> Hidden from users</label>
+                    <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.875rem"><input type="checkbox" id="catPremod" style="width:16px;height:16px"> Moderate all posts — new threads &amp; replies require approval</label>
                 </div>
                 <div style="display:flex;gap:0.5rem;justify-content:flex-end;margin-top:1.25rem">
                     <button class="btn btn-ghost" onclick="closeCatModal()">Cancel</button>
@@ -2088,6 +2090,7 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
         document.getElementById('catIcon').value = cat ? cat.icon : 'message-circle';
         document.getElementById('catSort').value = cat ? cat.sort_order : 0;
         document.getElementById('catHidden').checked = cat ? cat.is_hidden : false;
+        document.getElementById('catPremod').checked = cat ? !!cat.moderate_all_posts : false;
         document.getElementById('catModal').style.display = 'flex';
     }
     function closeCatModal() { document.getElementById('catModal').style.display = 'none'; }
@@ -2098,7 +2101,8 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
             color: document.getElementById('catColor').value,
             icon: document.getElementById('catIcon').value,
             sort_order: parseInt(document.getElementById('catSort').value) || 0,
-            is_hidden: document.getElementById('catHidden').checked
+            is_hidden: document.getElementById('catHidden').checked,
+            moderate_all_posts: document.getElementById('catPremod').checked
         };
         try {
             const r = await fetch('/api/admin/categories' + (editingCategoryId ? '/' + editingCategoryId : ''), {
@@ -2215,6 +2219,9 @@ async function initDatabase() {
         } catch (e) { /* exists */ }
         try {
             await pool.execute(`ALTER TABLE replies ADD COLUMN moderation_status ENUM('visible','pending') NOT NULL DEFAULT 'visible'`);
+        } catch (e) { /* exists */ }
+        try {
+            await pool.execute(`ALTER TABLE categories ADD COLUMN moderate_all_posts BOOLEAN DEFAULT FALSE`);
         } catch (e) { /* exists */ }
         try {
             await pool.execute(`CREATE TABLE IF NOT EXISTS banned_words (
