@@ -12,12 +12,18 @@ async function authenticate(req, res, next) {
         }
 
         const decoded = jwt.verify(token, JWT_SECRET);
-        const [rows] = await pool.execute(
-            'SELECT id, username, display_name, email, role, avatar, reputation FROM users WHERE id = ? AND is_banned = FALSE',
+        let [rows] = await pool.execute(
+            'SELECT id, username, display_name, email, role, avatar, reputation, is_banned, banned_until FROM users WHERE id = ?',
             [decoded.userId]
         );
 
-        if (rows.length === 0) {
+        // Auto-expire temporary bans: if the temp ban has passed, clear it
+        if (rows.length > 0 && rows[0].is_banned && rows[0].banned_until && new Date(rows[0].banned_until) <= new Date()) {
+            await pool.execute('UPDATE users SET is_banned = FALSE, banned_until = NULL, ban_reason = NULL WHERE id = ?', [rows[0].id]);
+            rows = await pool.execute('SELECT id, username, display_name, email, role, avatar, reputation FROM users WHERE id = ?', [decoded.userId]).then(r => r[0]);
+        }
+
+        if (rows.length === 0 || rows[0].is_banned) {
             req.user = null;
             return next();
         }

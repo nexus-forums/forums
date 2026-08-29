@@ -76,7 +76,7 @@ router.post('/login', async (req, res) => {
         }
 
         const users = await query(
-            'SELECT id, username, display_name, email, password_hash, role, avatar, reputation, is_banned FROM users WHERE username = ? OR email = ?',
+            'SELECT id, username, display_name, email, password_hash, role, avatar, reputation, is_banned, banned_until FROM users WHERE username = ? OR email = ?',
             [username_or_email, username_or_email]
         );
 
@@ -87,7 +87,16 @@ router.post('/login', async (req, res) => {
         const user = users[0];
 
         if (user.is_banned) {
-            return res.status(403).json({ success: false, error: 'Account has been banned' });
+            const until = user.banned_until ? new Date(user.banned_until) : null;
+            if (until && until <= new Date()) {
+                // Temporary ban has expired — clear it and allow login
+                await query('UPDATE users SET is_banned = FALSE, banned_until = NULL, ban_reason = NULL WHERE id = ?', [user.id]);
+                user.is_banned = false;
+            } else {
+                const when = until ? ` until ${until.toISOString().replace('T', ' ').slice(0, 16)} UTC` : ' permanently';
+                const reason = user.ban_reason ? ` Reason: ${user.ban_reason}` : '';
+                return res.status(403).json({ success: false, error: `Account banned${when}.${reason}` });
+            }
         }
 
         const valid = await bcrypt.compare(password, user.password_hash);

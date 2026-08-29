@@ -1633,10 +1633,52 @@ app.get('/moderate', requireRole(['moderator', 'admin']), async (req, res) => {
 }
 });
 
+// Ban a user (admin only) — permanent or temporary
+app.post('/api/admin/users/:id/ban', requireRole(['admin']), async (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const { days, reason } = await req.json();
+        if (id === req.user.id) return res.status(400).json({ success: false, error: 'You cannot ban yourself' });
+        const [target] = await query('SELECT id, username, role FROM users WHERE id = ?', [id]);
+        if (!target) return res.status(404).json({ success: false, error: 'User not found' });
+        if (target.role === 'admin') return res.status(403).json({ success: false, error: 'Admins cannot be banned' });
+
+        let until = null;
+        if (days !== undefined && days !== null && days !== '') {
+            const n = parseInt(days);
+            if (isNaN(n) || n < 1) return res.status(400).json({ success: false, error: 'Duration must be a positive number of days' });
+            until = new Date(Date.now() + n * 24 * 60 * 60 * 1000);
+        }
+        const cleanReason = (reason || '').toString().slice(0, 500) || null;
+        await query('UPDATE users SET is_banned = TRUE, banned_until = ?, ban_reason = ? WHERE id = ?', [until, cleanReason, id]);
+        res.json({ success: true, message: until ? `User banned until ${until.toISOString().slice(0, 10)}` : 'User banned permanently' });
+    } catch (error) {
+        console.error('Ban error:', error);
+        res.status(500).json({ success: false, error: 'Ban failed' });
+    }
+});
+
+// Unban a user (admin only)
+app.post('/api/admin/users/:id/unban', requireRole(['admin']), async (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const [target] = await query('SELECT id FROM users WHERE id = ?', [id]);
+        if (!target) return res.status(404).json({ success: false, error: 'User not found' });
+        await query('UPDATE users SET is_banned = FALSE, banned_until = NULL, ban_reason = NULL WHERE id = ?', [id]);
+        res.json({ success: true, message: 'User unbanned' });
+    } catch (error) {
+        res.status(500).json({ success: false, error: 'Unban failed' });
+    }
+});
+
 // Admin panel (basic)
 app.get('/admin', requireRole(['admin']), async (req, res) => {
     const stats = await query(`SELECT (SELECT COUNT(*) FROM users) as users, (SELECT COUNT(*) FROM threads) as threads, (SELECT COUNT(*) FROM replies) as replies, (SELECT COUNT(*) FROM users WHERE DATE(created_at) = CURDATE()) as newUsers, (SELECT COUNT(*) FROM threads WHERE DATE(created_at) = CURDATE()) as newThreads`);
-    const recentUsers = await query('SELECT id, username, display_name, email, created_at FROM users ORDER BY created_at DESC LIMIT 10');
+    const recentUsers = await query('SELECT id, username, display_name, email, created_at, role, is_banned, banned_until, ban_reason FROM users ORDER BY created_at DESC LIMIT 10');
+    const bannedUsers = await query(`SELECT u.id, u.username, u.display_name, u.email, u.banned_until, u.ban_reason, u.created_at, a.username as banned_by
+        FROM users u LEFT JOIN users a ON a.id = u.id WHERE u.is_banned = TRUE ORDER BY u.banned_until IS NULL DESC, u.banned_until DESC`);
+
+    const banStatus = u => u.banned_until ? `temp (until ${new Date(u.banned_until).toISOString().slice(0, 10)})` : 'permanent';
 
     const body = `
     <div class="container" style="padding-top:2rem">
@@ -1647,18 +1689,55 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
             <div class="card" style="text-align:center"><div style="font-size:2.5rem;font-weight:800;color:var(--success)">${stats[0].replies}</div><div style="color:var(--text-muted);font-size:0.875rem">Replies</div></div>
             <div class="card" style="text-align:center"><div style="font-size:2.5rem;font-weight:800;color:var(--warning)">${stats[0].newUsers}</div><div style="color:var(--text-muted);font-size:0.875rem">New Today</div></div>
         </div>
+        <h2 style="margin-bottom:1rem">Banned Users</h2>
+        <div class="thread-list" style="margin-bottom:2rem">
+            ${bannedUsers.length === 0 ? '<div class="empty-state" style="padding:1.5rem">No banned users</div>' : bannedUsers.map(u => `
+                <div class="thread-card" style="padding:1rem;align-items:center">
+                    <div class="thread-content" style="flex:1">
+                        <h4>${escapeHtml(u.display_name || u.username)} <span style="color:var(--text-muted);font-size:0.8rem;font-weight:400">@${u.username} • ${u.email}</span></h4>
+                        <div class="thread-meta"><span style="color:var(--danger);font-weight:600">${banStatus(u)}</span>${u.ban_reason ? `<span>— ${escapeHtml(u.ban_reason)}</span>` : ''}</div>
+                    </div>
+                    <button class="btn btn-ghost btn-sm" onclick="unbanUser(${u.id})">Unban</button>
+                </div>`).join('')}
+        </div>
         <h2 style="margin-bottom:1rem">Recent Users</h2>
         <div class="thread-list">
             ${recentUsers.map(u => `
-                <div class="thread-card" style="padding:1rem">
-                    <div class="thread-content">
-                        <h4>${escapeHtml(u.display_name || u.username)} <span style="color:var(--text-muted);font-size:0.8rem;font-weight:400">@${u.username} • ${u.email}</span></h4>
+                <div class="thread-card" style="padding:1rem;align-items:center">
+                    <div class="thread-content" style="flex:1">
+                        <h4>${escapeHtml(u.display_name || u.username)} <span style="color:var(--text-muted);font-size:0.8rem;font-weight:400">@${u.username} • ${u.email}${u.role !== 'user' ? ` • ${u.role}` : ''}${u.is_banned ? ` • <span style=\"color:var(--danger)\">banned: ${banStatus(u)}</span>` : ''}</span></h4>
                         <div class="thread-meta"><span>${timeAgo(u.created_at)}</span></div>
                     </div>
+                    ${u.role !== 'admin' && u.id !== req.user.id ? `
+                    <div style="display:flex;gap:0.5rem;flex-shrink:0">
+                        <button class="btn btn-ghost btn-sm" onclick="banUser(${u.id}, ${u.is_banned ? 1 : 0})">${u.is_banned ? 'Modify Ban' : 'Ban'}</button>
+                        ${u.is_banned ? `<button class=\"btn btn-ghost btn-sm\" onclick=\"unbanUser(${u.id})\">Unban</button>` : ''}
+                    </div>` : ''}
                 </div>
             `).join('')}
         </div>
-    </div>`;
+    </div>
+    <script>
+    async function banUser(id) {
+        const daysStr = prompt('Ban duration in days (leave empty for PERMANENT ban):', '7');
+        if (daysStr === null) return;
+        const reason = prompt('Reason (optional):') || '';
+        const payload = { reason };
+        if (daysStr.trim() !== '') payload.days = parseInt(daysStr);
+        try {
+            const r = await fetch('/api/admin/users/' + id + '/ban', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+            const d = await r.json();
+            if (d.success) location.reload(); else showToast(d.error || 'Ban failed', 'error');
+        } catch { showToast('Ban failed', 'error'); }
+    }
+    async function unbanUser(id) {
+        try {
+            const r = await fetch('/api/admin/users/' + id + '/unban', { method: 'POST' });
+            const d = await r.json();
+            if (d.success) location.reload(); else showToast(d.error || 'Unban failed', 'error');
+        } catch { showToast('Unban failed', 'error'); }
+    }
+    </script>`;
     res.header('Content-Type', 'text/html');
     res.send(page('Admin', body, req.user));
 });
@@ -1687,6 +1766,10 @@ async function initDatabase() {
                 if (!e.message.includes('Duplicate')) console.error('DB init warning:', e.message);
             }
         }
+        // Runtime migrations
+        try {
+            await pool.execute('ALTER TABLE users ADD COLUMN banned_until DATETIME DEFAULT NULL, ADD COLUMN ban_reason VARCHAR(500) DEFAULT NULL');
+        } catch (e) { /* column(s) already exist */ }
         console.log('✅ Database initialized');
 
         // Seed sample data if empty

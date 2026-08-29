@@ -19,7 +19,9 @@ CREATE TABLE IF NOT EXISTS users (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     last_active TIMESTAMP NULL DEFAULT NULL,
     post_count INT DEFAULT 0,
-    is_banned BOOLEAN DEFAULT FALSE
+    is_banned BOOLEAN DEFAULT FALSE,
+    banned_until DATETIME DEFAULT NULL,
+    ban_reason VARCHAR(500) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Categories/Forums table
