@@ -217,8 +217,8 @@ router.post('/api/threads/:id/replies', requireAuth, async (req, res) => {
             return insertResult;
         });
 
-        // Notify thread author
-        if (threadCheck.user_id !== req.user.id) {
+        // Notify thread author (unless the reply is held for moderation — it's sent on approval instead)
+        if (!pending && threadCheck.user_id !== req.user.id) {
             await query(
                 'INSERT INTO notifications (user_id, actor_id, type, title, message, link) VALUES (?, ?, ?, ?, ?, ?)',
                 [threadCheck.user_id, req.user.id, 'reply', 'New reply', `${req.user.username} replied to your thread`, `/t/${threadId}`]
@@ -459,6 +459,20 @@ router.post('/api/mod/pending/resolve', requireRole(['moderator', 'admin']), asy
             const [row] = await query(`SELECT id FROM ${table} WHERE id = ?`, [pid]);
             if (!row) return res.status(404).json({ success: false, error: 'Post not found' });
             await query(`UPDATE ${table} SET moderation_status = 'visible' WHERE id = ?`, [pid]);
+            if (type === 'reply') {
+                // Notification was deferred while the reply was pending — send it now
+                const [r] = await query('SELECT user_id, thread_id FROM replies WHERE id = ?', [pid]);
+                if (r) {
+                    const [t] = await query('SELECT user_id, title FROM threads WHERE id = ?', [r.thread_id]);
+                    if (t && t.user_id !== r.user_id) {
+                        const [actor] = await query('SELECT username FROM users WHERE id = ?', [r.user_id]);
+                        await query(
+                            'INSERT INTO notifications (user_id, actor_id, type, title, message, link) VALUES (?, ?, ?, ?, ?, ?)',
+                            [t.user_id, r.user_id, 'reply', 'New reply', `${actor.username} replied to your thread`, `/t/${r.thread_id}`]
+                        );
+                    }
+                }
+            }
             return res.json({ success: true, message: 'Post approved and now visible' });
         }
         // delete

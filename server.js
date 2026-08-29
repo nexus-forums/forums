@@ -1914,10 +1914,9 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
             `).join('')}
         </div>
         ${paginationHtml}
-    </div>
-    <div class="card" style="margin-top:2rem;padding:1.5rem">
-        <h2 style="font-size:1.25rem;font-weight:700;margin-bottom:0.5rem">Banned Words Filter</h2>
-        <p style="color:var(--text-muted);font-size:0.875rem;margin-bottom:1rem">Words marked <strong>Block</strong> are rejected outright when users post. Words marked <strong>Moderate</strong> allow the post through but place it in the moderation queue until a moderator approves it. Matching is case-insensitive and matches whole words.</p>
+        <div class="card" style="margin-top:2rem;padding:1.5rem">
+            <h2 style="font-size:1.25rem;font-weight:700;margin-bottom:0.5rem">Banned Words Filter</h2>
+            <p style="color:var(--text-muted);font-size:0.875rem;margin-bottom:1rem">Words marked <strong>Block</strong> are rejected outright when users post. Words marked <strong>Moderate</strong> allow the post through but place it in the moderation queue until a moderator approves it. Matching is case-insensitive and matches whole words.</p>
         <form id="wordForm" onsubmit="event.preventDefault(); addWord()" style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:1rem">
             <input id="wordInput" class="form-input" placeholder="Word or phrase" required style="width:220px">
             <select id="wordAction" class="form-input" style="width:auto">
@@ -1933,6 +1932,7 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
                 <button onclick="deleteWord(${w.id})" title="Remove" style="cursor:pointer;border:none;background:none;color:var(--text-muted);font-weight:700">×</button>
             </span>`).join('')}
         </div>`}
+        </div>
     </div>
     <script>
     async function addWord() {
