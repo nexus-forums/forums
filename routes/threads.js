@@ -3,11 +3,14 @@ const { query, transaction } = require('../config/db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 const { slugify, timeAgo, generateAvatar } = require('../utils/helpers');
 const { checkContent } = require('../utils/filter');
+const { getVisibleCategoryIds, canSeeCategory, categoryFilterFragment } = require('../utils/visibility');
 const router = new HyperExpress.Router();
 
 // List threads with filters
 router.get('/api/threads', async (req, res) => {
     try {
+        const visibleIds = await getVisibleCategoryIds(req.user);
+        const pvf = categoryFilterFragment(visibleIds, 't');
         const page = Math.max(1, parseInt(req.query.page) || 1);
         const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
         const offset = (page - 1) * limit;
@@ -23,10 +26,10 @@ router.get('/api/threads', async (req, res) => {
             JOIN categories c ON t.category_id = c.id
             JOIN users u ON t.user_id = u.id
             LEFT JOIN users lu ON t.last_post_user_id = lu.id
-            WHERE t.is_pinned = FALSE AND c.is_hidden = FALSE AND t.moderation_status = 'visible'
+            WHERE t.is_pinned = FALSE AND c.is_hidden = FALSE AND t.moderation_status = 'visible'${pvf.sql}
         `;
-        let countSql = `SELECT COUNT(*) as total FROM threads t JOIN categories c ON t.category_id = c.id WHERE t.is_pinned = FALSE AND c.is_hidden = FALSE`;
-        let params = [];
+        let countSql = `SELECT COUNT(*) as total FROM threads t JOIN categories c ON t.category_id = c.id WHERE t.is_pinned = FALSE AND c.is_hidden = FALSE${pvf.sql}`;
+        let params = [...pvf.params];
 
         if (category) {
             sql += ` AND c.slug = ?`;
@@ -99,6 +102,9 @@ const threadDetailHandler = async (req, res) => {
         if (threads[0].moderation_status === 'pending' && !(req.user && (['moderator', 'admin'].includes(req.user.role) || req.user.id === threads[0].user_id))) {
             return res.status(404).json({ success: false, error: 'Thread not found' });
         }
+        if (!(await canSeeCategory(req.user, threads[0].category_id))) {
+            return res.status(404).json({ success: false, error: 'Thread not found' });
+        }
 
         const page = Math.max(1, parseInt(req.query.page) || 1);
         const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 10));
@@ -149,6 +155,9 @@ router.post('/api/threads', requireAuth, async (req, res) => {
         const isMod = ['moderator', 'admin'].includes(req.user.role);
         let pending = false;
         if (!isMod) {
+            if (!(await canSeeCategory(req.user, category_id))) {
+                return res.status(404).json({ success: false, error: 'Category not found' });
+            }
             const filterResult = await checkContent(`${title}\n${content}`);
             if (filterResult.blocked.length > 0) {
                 return res.status(400).json({ success: false, error: `Your post contains banned word(s): ${filterResult.blocked.join(', ')}` });
@@ -196,9 +205,10 @@ router.post('/api/threads/:id/replies', requireAuth, async (req, res) => {
             return res.status(400).json({ success: false, error: 'Reply content is required' });
         }
 
-        const [threadCheck] = await query(`SELECT t.id, t.is_locked, t.user_id, c.moderate_all_posts
+        const [threadCheck] = await query(`SELECT t.id, t.is_locked, t.user_id, t.category_id, c.moderate_all_posts
             FROM threads t JOIN categories c ON c.id = t.category_id WHERE t.id = ?`, [threadId]);
         if (!threadCheck) return res.status(404).json({ success: false, error: 'Thread not found' });
+        if (!(await canSeeCategory(req.user, threadCheck.category_id))) return res.status(404).json({ success: false, error: 'Thread not found' });
         if (threadCheck.is_locked) return res.status(403).json({ success: false, error: 'Thread is locked' });
 
         const isMod = ['moderator', 'admin'].includes(req.user.role);
@@ -723,14 +733,15 @@ router.patch('/api/replies/:id/solution', requireAuth, async (req, res) => {
 // Categories
 router.get('/api/categories', async (req, res) => {
     try {
+        const visibleIds = await getVisibleCategoryIds(req.user);
+        const vf = categoryFilterFragment(visibleIds, 'c', 'id');
         const categories = await query(`
             SELECT c.*,
                 (SELECT COUNT(*) FROM threads WHERE category_id = c.id) as actual_threads,
                 (SELECT t.title FROM threads t WHERE t.category_id = c.id ORDER BY t.last_post_at DESC LIMIT 1) as latest_thread,
                 (SELECT u.username FROM threads t JOIN users u ON t.user_id = u.id WHERE t.category_id = c.id ORDER BY t.last_post_at DESC LIMIT 1) as latest_user,
                 (SELECT t.last_post_at FROM threads t WHERE t.category_id = c.id ORDER BY t.last_post_at DESC LIMIT 1) as latest_time
-            FROM categories c WHERE c.is_hidden = FALSE ORDER BY c.sort_order
-        `);
+            FROM categories c WHERE c.is_hidden = FALSE${vf.sql} ORDER BY c.sort_order`, vf.params);
         res.json({ success: true, categories });
     } catch (error) {
         res.status(500).json({ success: false });
@@ -781,10 +792,13 @@ router.get('/api/search', async (req, res) => {
         const q = req.query.q || '';
         if (!q || q.length < 2) return res.json({ success: true, results: [] });
 
+        const visibleIds = await getVisibleCategoryIds(req.user);
+        const tvf = categoryFilterFragment(visibleIds, 't');
+        const cvf = categoryFilterFragment(visibleIds, 'c', 'id');
         const [threads, users, categories] = await Promise.all([
-            query(`SELECT t.id, t.title, t.slug, c.slug as cat_slug FROM threads t JOIN categories c ON t.category_id = c.id WHERE t.title LIKE ? ORDER BY t.last_post_at DESC LIMIT 5`, [`%${q}%`]),
+            query(`SELECT t.id, t.title, t.slug, c.slug as cat_slug FROM threads t JOIN categories c ON t.category_id = c.id WHERE t.title LIKE ? AND t.moderation_status = 'visible'${tvf.sql} ORDER BY t.last_post_at DESC LIMIT 5`, [`%${q}%`, ...tvf.params]),
             query(`SELECT id, username, display_name, avatar FROM users WHERE username LIKE ? OR display_name LIKE ? LIMIT 5`, [`%${q}%`, `%${q}%`]),
-            query(`SELECT id, name, slug, color, icon FROM categories WHERE name LIKE ? LIMIT 5`, [`%${q}%`])
+            query(`SELECT id, name, slug, color, icon FROM categories c WHERE c.name LIKE ? AND c.is_hidden = FALSE${cvf.sql} LIMIT 5`, [`%${q}%`, ...cvf.params])
         ]);
 
         res.json({ success: true, results: { threads, users, categories } });

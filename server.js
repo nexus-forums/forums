@@ -11,6 +11,7 @@ const { page, alertBox } = require('./utils/render');
 const { timeAgo, slugify, escapeHtml, generateAvatar, iconSvg } = require('./utils/helpers');
 const { authenticate, requireRole } = require('./middleware/auth');
 const { checkContent, clearCache } = require('./utils/filter');
+const { getVisibleCategoryIds, canSeeCategory, categoryFilterFragment } = require('./utils/visibility');
 const authRouter = require('./routes/auth');
 const threadsRouter = require('./routes/threads');
 
@@ -98,6 +99,7 @@ app.use('/', threadsRouter);
 // Homepage
 app.get('/', async (req, res) => {
     try {
+        const visibleIds = await getVisibleCategoryIds(req.user);
         const [categories, hotThreads, recentThreads, leaderboard, stats] = await Promise.all([
             query(`SELECT c.*,
                 (SELECT COUNT(*) FROM threads WHERE category_id = c.id) as actual_threads,
@@ -120,7 +122,12 @@ app.get('/', async (req, res) => {
             query(`SELECT (SELECT COUNT(*) FROM users) as users, (SELECT COUNT(*) FROM threads) as threads, (SELECT COUNT(*) FROM replies) as replies`)
         ]);
 
-        const categoryCards = categories.map(cat => `
+        const visFilter = (list) => visibleIds === null ? list : list.filter(item => visibleIds.includes(item.id));
+        const visibleCategories = visFilter(categories);
+        const visibleHot = visFilter(hotThreads);
+        const visibleRecent = visFilter(recentThreads);
+
+        const categoryCards = visibleCategories.map(cat => `
             <a href="/c/${cat.slug}" class="card category-card">
                 <div class="card-header">
                     <div class="card-icon" style="background:${cat.color}26;color:${cat.color}">
@@ -140,7 +147,7 @@ app.get('/', async (req, res) => {
             </a>
         `).join('');
 
-        const hotCards = hotThreads.map(t => `
+        const hotCards = visibleHot.map(t => `
             <a href="/t/${t.id}/${t.slug}" class="card" style="position:relative;overflow:hidden">
                 <div style="position:absolute;top:0;left:0;right:0;height:3px;background:${t.category_color}"></div>
                 <div class="card-header">
@@ -162,7 +169,7 @@ app.get('/', async (req, res) => {
             </a>
         `).join('');
 
-        const recentList = recentThreads.map(t => `
+        const recentList = visibleRecent.map(t => `
             <a href="/t/${t.id}/${t.slug}" class="thread-card ${t.is_pinned ? 'pinned' : ''}">
                 <div class="avatar-wrap">
                     <img src="${t.avatar || generateAvatar(t.username || t.display_name)}" alt="${t.username}" width="48" height="48" loading="lazy">
@@ -268,6 +275,9 @@ app.get('/c/:slug', async (req, res) => {
     try {
         const [category] = await query('SELECT * FROM categories WHERE slug = ? AND is_hidden = FALSE', [req.params.slug]);
         if (!category) return res.status(404).send(page('Not Found', '<div class="container"><div class="empty-state"><h3>Category not found</h3></div></div>', req.user));
+        if (!(await canSeeCategory(req.user, category.id))) {
+            return res.status(404).send(page('Not Found', '<div class="container"><div class="empty-state"><h3>Category not found</h3></div></div>', req.user));
+        }
 
         const pageNum = Math.max(1, parseInt(req.query.page) || 1);
         const limit = 20;
@@ -368,6 +378,9 @@ const threadPageHandler = async (req, res) => {
         } else thread.user_liked = false;
 
         if (!thread) return res.status(404).send(page('Not Found', '<div class="container"><div class="empty-state"><h3>Thread not found</h3></div></div>', req.user));
+        if (!(await canSeeCategory(req.user, thread.category_id))) {
+            return res.status(404).send(page('Not Found', '<div class="container"><div class="empty-state"><h3>Thread not found</h3></div></div>', req.user));
+        }
         const isMod = req.user && ['moderator', 'admin'].includes(req.user.role);
         const canSeePending = isMod || (req.user && req.user.id === thread.user_id);
         if (thread.moderation_status === 'pending' && !canSeePending) {
@@ -667,6 +680,8 @@ app.get('/tag/:id/:slug', async (req, res) => {
         const [tag] = await query('SELECT * FROM tags WHERE id = ?', [tagId]);
         if (!tag) return res.status(404).send(page('Not Found', '<div class="container"><div class="empty-state"><h3>Tag not found</h3></div></div>', req.user));
 
+        const visibleIds = await getVisibleCategoryIds(req.user);
+        const vf = categoryFilterFragment(visibleIds, 't');
         const pageNum = Math.max(1, parseInt(req.query.page) || 1);
         const limit = 20;
         const offset = (pageNum - 1) * limit;
@@ -677,9 +692,9 @@ app.get('/tag/:id/:slug', async (req, res) => {
                 FROM threads t
                 JOIN thread_tags tt ON tt.thread_id = t.id
                 JOIN categories c ON t.category_id = c.id JOIN users u ON t.user_id = u.id
-                WHERE tt.tag_id = ? AND t.moderation_status = 'visible'
-                ORDER BY t.is_pinned DESC, t.last_post_at DESC LIMIT ? OFFSET ?`, [tagId, limit, offset]),
-            query('SELECT COUNT(*) as total FROM thread_tags tt JOIN threads t ON t.id = tt.thread_id WHERE tt.tag_id = ? AND t.moderation_status = ?', [tagId, 'visible'])
+                WHERE tt.tag_id = ? AND t.moderation_status = 'visible'${vf.sql}
+                ORDER BY t.is_pinned DESC, t.last_post_at DESC LIMIT ? OFFSET ?`, [...vf.params, tagId, limit, offset]),
+            query(`SELECT COUNT(*) as total FROM thread_tags tt JOIN threads t ON t.id = tt.thread_id WHERE tt.tag_id = ? AND t.moderation_status = ?${vf.sql.replace(/\bt\./g, '')}`, [...vf.params, tagId, 'visible'])
         ]);
         const total = countResult[0].total;
         const pages = Math.ceil(total / limit);
@@ -745,7 +760,9 @@ app.get('/tag/:id/:slug', async (req, res) => {
 app.get('/new', authenticate, async (req, res) => {
     if (!req.user) return res.redirect('/login?return=/new');
 
-    const categories = await query('SELECT id, name, slug FROM categories WHERE is_hidden = FALSE ORDER BY sort_order');
+    const visibleCatIds = await getVisibleCategoryIds(req.user);
+    const allCats = await query('SELECT id, name, slug FROM categories WHERE is_hidden = FALSE ORDER BY sort_order');
+    const categories = visibleCatIds === null ? allCats : allCats.filter(c => visibleCatIds.includes(c.id));
     const tags = await query('SELECT id, name, color FROM tags ORDER BY name');
     const prefill = req.query.category || '';
 
@@ -822,15 +839,18 @@ app.get('/u/:username', async (req, res) => {
         );
         if (!user) return res.status(404).send(page('Not Found', '<div class="container"><div class="empty-state"><h3>User not found</h3></div></div>', req.user));
 
+        const viewingOwnProfile = req.user && req.user.id === user.id;
+        const profileVisIds = viewingOwnProfile ? null : await getVisibleCategoryIds(req.user);
+        const pvf = categoryFilterFragment(profileVisIds, 't');
         const recentThreads = await query(
             `SELECT t.id, t.title, t.slug, t.created_at, t.reply_count, t.views, c.name as category_name, c.slug as category_slug, c.color as category_color
              FROM threads t JOIN categories c ON t.category_id = c.id
-             WHERE t.user_id = ? AND t.moderation_status = 'visible' ORDER BY t.created_at DESC LIMIT 5`, [user.id]);
+             WHERE t.user_id = ? AND t.moderation_status = 'visible'${pvf.sql} ORDER BY t.created_at DESC LIMIT 5`, [user.id, ...pvf.params]);
 
         const recentReplies = await query(
             `SELECT r.id, r.content, r.created_at, t.id as thread_id, t.title as thread_title, t.slug as thread_slug
              FROM replies r JOIN threads t ON r.thread_id = t.id
-             WHERE r.user_id = ? AND r.moderation_status = 'visible' ORDER BY r.created_at DESC LIMIT 5`, [user.id]);
+             WHERE r.user_id = ? AND r.moderation_status = 'visible'${pvf.sql} ORDER BY r.created_at DESC LIMIT 5`, [user.id, ...pvf.params]);
 
         const threadList = recentThreads.map(t => `
             <a href="/t/${t.id}/${t.slug}" class="thread-card" style="padding:1rem">
@@ -974,6 +994,8 @@ app.get('/users', async (req, res) => {
 // Latest threads
 app.get('/latest', async (req, res) => {
     try {
+        const visibleIds = await getVisibleCategoryIds(req.user);
+        const vf = categoryFilterFragment(visibleIds, 't');
         const pageNum = Math.max(1, parseInt(req.query.page) || 1);
         const limit = 20;
         const offset = (pageNum - 1) * limit;
@@ -983,9 +1005,9 @@ app.get('/latest', async (req, res) => {
                 u.username, u.display_name, u.avatar, lu.username as last_username
                 FROM threads t JOIN categories c ON t.category_id = c.id JOIN users u ON t.user_id = u.id
                 LEFT JOIN users lu ON t.last_post_user_id = lu.id
-                WHERE t.moderation_status = 'visible'
-                ORDER BY t.last_post_at DESC LIMIT ? OFFSET ?`, [limit, offset]),
-            query('SELECT COUNT(*) as total FROM threads WHERE moderation_status = ?', ['visible'])
+                WHERE t.moderation_status = 'visible'${vf.sql}
+                ORDER BY t.last_post_at DESC LIMIT ? OFFSET ?`, [...vf.params, limit, offset]),
+            query(`SELECT COUNT(*) as total FROM threads WHERE moderation_status = 'visible'${vf.sql.replace(/\bt\./g, '')}`, vf.params)
         ]);
         const total = countResult[0].total;
         const pages = Math.ceil(total / limit);
@@ -1833,10 +1855,70 @@ app.delete('/api/admin/words/:id', requireRole(['admin']), async (req, res) => {
     }
 });
 
+// User group management (admin only)
+app.post('/api/admin/groups', requireRole(['admin']), async (req, res) => {
+    try {
+        const { name, description } = await req.json();
+        const n = (name || '').toString().trim();
+        if (!n || n.length > 100) return res.status(400).json({ success: false, error: 'Group name is required (max 100 chars)' });
+        let slug = slugify(n);
+        if (!slug) return res.status(400).json({ success: false, error: 'Name must contain at least one letter or number' });
+        const [dup] = await query('SELECT id FROM user_groups WHERE slug = ?', [slug]);
+        if (dup) slug = slug + '-' + Date.now().toString(36);
+        const result = await query('INSERT INTO user_groups (name, slug, description) VALUES (?, ?, ?)',
+            [n, slug, (description || '').toString().slice(0, 500) || null]);
+        res.json({ success: true, group: { id: result.insertId, name: n }, message: `Group "${n}" created` });
+    } catch (error) {
+        console.error('Create group error:', error);
+        res.status(500).json({ success: false, error: 'Failed to create group' });
+    }
+});
+
+app.delete('/api/admin/groups/:id', requireRole(['admin']), async (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const [group] = await query('SELECT id, name FROM user_groups WHERE id = ?', [id]);
+        if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+        await query('DELETE FROM user_groups WHERE id = ?', [id]);
+        res.json({ success: true, message: `Group "${group.name}" deleted` });
+    } catch (error) {
+        console.error('Delete group error:', error);
+        res.status(500).json({ success: false, error: 'Failed to delete group' });
+    }
+});
+
+app.post('/api/admin/groups/:id/members', requireRole(['admin']), async (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const [group] = await query('SELECT id, name FROM user_groups WHERE id = ?', [id]);
+        if (!group) return res.status(404).json({ success: false, error: 'Group not found' });
+        const { username } = await req.json();
+        const [user] = await query('SELECT id, username FROM users WHERE username = ?', [(username || '').toString().trim()]);
+        if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+        await query('INSERT IGNORE INTO user_group_members (user_group_id, user_id) VALUES (?, ?)', [id, user.id]);
+        res.json({ success: true, message: `@${user.username} added to "${group.name}"` });
+    } catch (error) {
+        console.error('Add group member error:', error);
+        res.status(500).json({ success: false, error: 'Failed to add member' });
+    }
+});
+
+app.delete('/api/admin/groups/:id/members/:username', requireRole(['admin']), async (req, res) => {
+    try {
+        const [user] = await query('SELECT id FROM users WHERE username = ?', [req.params.username]);
+        if (!user) return res.status(404).json({ success: false, error: 'User not found' });
+        await query('DELETE FROM user_group_members WHERE user_group_id = ? AND user_id = ?', [parseInt(req.params.id), user.id]);
+        res.json({ success: true, message: 'Member removed' });
+    } catch (error) {
+        console.error('Remove group member error:', error);
+        res.status(500).json({ success: false, error: 'Failed to remove member' });
+    }
+});
+
 // Category management (admin only)
 app.post('/api/admin/categories', requireRole(['admin']), async (req, res) => {
     try {
-        const { name, description, color, icon, sort_order, is_hidden, moderate_all_posts } = await req.json();
+        const { name, description, color, icon, sort_order, is_hidden, moderate_all_posts, access_type, allowed_group_ids } = await req.json();
         const n = (name || '').toString().trim();
         if (!n || n.length > 100) return res.status(400).json({ success: false, error: 'Name is required (max 100 chars)' });
         let slug = slugify(n);
@@ -1844,11 +1926,17 @@ app.post('/api/admin/categories', requireRole(['admin']), async (req, res) => {
         const [dup] = await query('SELECT id FROM categories WHERE slug = ?', [slug]);
         if (dup) slug = slug + '-' + Date.now().toString(36);
         const sortOrder = parseInt(sort_order) || 0;
+        const accessType = access_type === 'groups' ? 'groups' : 'public';
         try {
             const result = await query(
-                'INSERT INTO categories (name, slug, description, color, icon, sort_order, is_hidden, moderate_all_posts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-                [n, slug, (description || '').toString().slice(0, 500) || null, /^#[0-9a-fA-F]{6}$/.test(color || '') ? color : '#6366f1', icon || 'message-circle', sortOrder, is_hidden ? 1 : 0, moderate_all_posts ? 1 : 0]
+                'INSERT INTO categories (name, slug, description, color, icon, sort_order, is_hidden, moderate_all_posts, access_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [n, slug, (description || '').toString().slice(0, 500) || null, /^#[0-9a-fA-F]{6}$/.test(color || '') ? color : '#6366f1', icon || 'message-circle', sortOrder, is_hidden ? 1 : 0, moderate_all_posts ? 1 : 0, accessType]
             );
+            if (accessType === 'groups' && Array.isArray(allowed_group_ids) && allowed_group_ids.length > 0) {
+                for (const gid of allowed_group_ids) {
+                    await query('INSERT IGNORE INTO category_groups (category_id, user_group_id) VALUES (?, ?)', [result.insertId, parseInt(gid)]);
+                }
+            }
             res.json({ success: true, category: { id: result.insertId, name: n, slug }, message: `Category "${n}" created` });
         } catch (e) {
             if (e.message.includes('Duplicate')) return res.status(400).json({ success: false, error: 'A category with that slug already exists' });
@@ -1865,7 +1953,7 @@ app.patch('/api/admin/categories/:id', requireRole(['admin']), async (req, res) 
         const id = parseInt(req.params.id);
         const [cat] = await query('SELECT id, name FROM categories WHERE id = ?', [id]);
         if (!cat) return res.status(404).json({ success: false, error: 'Category not found' });
-        const { name, description, color, icon, sort_order, is_hidden, moderate_all_posts } = await req.json();
+        const { name, description, color, icon, sort_order, is_hidden, moderate_all_posts, access_type, allowed_group_ids } = await req.json();
         const updates = [];
         const values = [];
         if (name !== undefined) {
@@ -1880,6 +1968,17 @@ app.patch('/api/admin/categories/:id', requireRole(['admin']), async (req, res) 
         if (sort_order !== undefined) { updates.push('sort_order = ?'); values.push(parseInt(sort_order) || 0); }
         if (is_hidden !== undefined) { updates.push('is_hidden = ?'); values.push(is_hidden ? 1 : 0); }
         if (moderate_all_posts !== undefined) { updates.push('moderate_all_posts = ?'); values.push(moderate_all_posts ? 1 : 0); }
+        if (access_type !== undefined) {
+            if (!['public', 'groups'].includes(access_type)) return res.status(400).json({ success: false, error: 'Invalid access type' });
+            updates.push('access_type = ?');
+            values.push(access_type);
+            await query('DELETE FROM category_groups WHERE category_id = ?', [id]);
+            if (access_type === 'groups' && Array.isArray(allowed_group_ids) && allowed_group_ids.length > 0) {
+                for (const gid of allowed_group_ids) {
+                    await query('INSERT IGNORE INTO category_groups (category_id, user_group_id) VALUES (?, ?)', [id, parseInt(gid)]);
+                }
+            }
+        }
         if (updates.length === 0) return res.status(400).json({ success: false, error: 'Nothing to update' });
         values.push(id);
         await query(`UPDATE categories SET ${updates.join(', ')} WHERE id = ?`, values);
@@ -1960,6 +2059,13 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
     const listedUsers = await query(`SELECT id, username, display_name, email, created_at, role, is_banned, banned_until, ban_reason FROM users ${userWhere} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...searchParams, perPage, (pageNum - 1) * perPage]);
     const bannedWords = await query('SELECT id, word, action FROM banned_words ORDER BY word');
     const categories = await query(`SELECT c.*, (SELECT COUNT(*) FROM threads WHERE category_id = c.id) as actual_threads FROM categories c ORDER BY c.sort_order, c.name`);
+    const catGroups = await query('SELECT category_id, user_group_id FROM category_groups');
+    for (const c of categories) {
+        c.allowed_group_ids = catGroups.filter(cg => cg.category_id === c.id).map(cg => cg.user_group_id);
+    }
+    const groups = await query(`SELECT g.*, (SELECT COUNT(*) FROM user_group_members m WHERE m.user_group_id = g.id) as member_count,
+        (SELECT GROUP_CONCAT(u.username) FROM user_group_members m JOIN users u ON u.id = m.user_id WHERE m.user_group_id = g.id) as member_names
+        FROM user_groups g ORDER BY g.name`);
     const iconOptions = ['message-circle', 'cpu', 'palette', 'gamepad-2', 'atom', 'leaf', 'life-buoy'];
 
     const banStatus = u => u.banned_until ? `temp (until ${new Date(u.banned_until).toISOString().slice(0, 10)})` : 'permanent';
@@ -2039,7 +2145,35 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
                 </div>
             </div>`).join('')}
         </div>
-        <div id="catModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center">
+    <div class="card" style="margin-top:2rem;padding:1.5rem">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;margin-bottom:0.5rem">
+            <h2 style="font-size:1.25rem;font-weight:700">User Groups</h2>
+            <div style="display:flex;gap:0.5rem">
+                <input id="newGroupName" class="form-input" placeholder="New group name" maxlength="100" style="width:200px">
+                <button class="btn btn-ghost btn-sm" onclick="createGroup()">＋ Create Group</button>
+            </div>
+        </div>
+        <p style="color:var(--text-muted);font-size:0.875rem;margin-bottom:1rem">Restrict a category to one or more groups in its edit modal — only members (and staff) will see it.</p>
+        ${groups.length === 0 ? '<div class="empty-state" style="padding:1rem">No user groups yet</div>' : groups.map(g => `
+        <div class="thread-card" style="padding:0.85rem 1rem;align-items:center">
+            <div class="thread-content" style="flex:1">
+                <h4 style="margin:0">${escapeHtml(g.name)} <span style="color:var(--text-muted);font-size:0.8rem;font-weight:400">${g.member_count} member${g.member_count === 1 ? '' : 's'}</span></h4>
+                <div id="groupMembers-${g.id}" style="display:none;margin-top:0.5rem">
+                    ${(g.member_names || '').split(',').filter(Boolean).map(nm => `
+                    <span data-username="${escapeHtml(nm)}" style="display:inline-flex;align-items:center;gap:0.35rem;margin:0.15rem 0.35rem 0.15rem 0;padding:0.15rem 0.6rem;border:1px solid var(--border);border-radius:999px;font-size:0.8rem;background:var(--bg-secondary)">@${escapeHtml(nm)}<button onclick="removeGroupMember(${g.id}, this)" title="Remove" style="cursor:pointer;border:none;background:none;color:var(--danger);font-weight:700">×</button></span>`).join('')}
+                    <div style="display:flex;gap:0.4rem;margin-top:0.5rem">
+                        <input class="form-input group-add-input" placeholder="Add by username" style="width:180px;padding:0.35rem 0.6rem;font-size:0.85rem">
+                        <button class="btn btn-ghost btn-sm" onclick="addGroupMember(${g.id}, this)">Add</button>
+                    </div>
+                </div>
+            </div>
+            <div style="display:flex;gap:0.5rem;flex-shrink:0">
+                <button class="btn btn-ghost btn-sm" onclick="toggleGroupMembers(${g.id}, this)">Members</button>
+                <button class="btn btn-danger btn-sm" onclick="deleteGroup(${g.id}, this)">🗑</button>
+            </div>
+        </div>`).join('')}
+    </div>
+    <div id="catModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100;align-items:center;justify-content:center">
             <div class="card" style="width:min(480px, 92vw);padding:1.5rem;max-height:90vh;overflow-y:auto">
                 <h3 id="catModalTitle" style="margin-bottom:1rem">New Category</h3>
                 <div style="display:flex;flex-direction:column;gap:0.75rem">
@@ -2049,6 +2183,16 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
                         <div style="flex:1"><label style="font-size:0.8rem;font-weight:600">Color</label><input id="catColor" type="color" class="form-input" style="height:2.5rem;padding:0.25rem" value="#6366f1"></div>
                         <div style="flex:1"><label style="font-size:0.8rem;font-weight:600">Icon</label><select id="catIcon" class="form-input">${iconOptions.map(i => `<option value="${i}">${i}</option>`).join('')}</select></div>
                         <div style="width:90px"><label style="font-size:0.8rem;font-weight:600">Order</label><input id="catSort" type="number" class="form-input" value="0"></div>
+                    </div>
+                    <div><label style="font-size:0.8rem;font-weight:600">Who can see this category?</label>
+                        <select id="catAccess" class="form-input" onchange="document.getElementById('catGroupsWrap').style.display = this.value === 'groups' ? 'block' : 'none'">
+                            <option value="public">Public — everyone</option>
+                            <option value="groups">Restricted — user groups only</option>
+                        </select>
+                    </div>
+                    <div id="catGroupsWrap" style="display:none;border:1px solid var(--border);border-radius:var(--radius);padding:0.75rem">
+                        <label style="font-size:0.8rem;font-weight:600;display:block;margin-bottom:0.5rem">Visible to these groups (admins always see everything)</label>
+                        ${groups.length === 0 ? '<span style="color:var(--danger);font-size:0.8rem">No user groups exist yet — create one below the category list.</span>' : `<div style="display:flex;flex-direction:column;gap:0.35rem">${groups.map(g => `<label style="display:flex;align-items:center;gap:0.5rem;font-size:0.85rem"><input type="checkbox" class="cat-group-check" value="${g.id}" style="width:16px;height:16px"> ${escapeHtml(g.name)} (${g.member_count} member${g.member_count === 1 ? '' : 's'})</label>`).join('')}</div>`}
                     </div>
                     <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.875rem"><input type="checkbox" id="catHidden" style="width:16px;height:16px"> Hidden from users</label>
                     <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.875rem"><input type="checkbox" id="catPremod" style="width:16px;height:16px"> Moderate all posts — new threads &amp; replies require approval</label>
@@ -2089,6 +2233,11 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
         document.getElementById('catColor').value = cat ? cat.color : '#6366f1';
         document.getElementById('catIcon').value = cat ? cat.icon : 'message-circle';
         document.getElementById('catSort').value = cat ? cat.sort_order : 0;
+        document.getElementById('catAccess').value = cat && cat.access_type === 'groups' ? 'groups' : 'public';
+        document.getElementById('catGroupsWrap').style.display = (cat && cat.access_type === 'groups') ? 'block' : 'none';
+        document.querySelectorAll('.cat-group-check').forEach(cb => {
+            cb.checked = cat ? (cat.allowed_group_ids || []).includes(cb.value === '' ? -1 : parseInt(cb.value)) : false;
+        });
         document.getElementById('catHidden').checked = cat ? cat.is_hidden : false;
         document.getElementById('catPremod').checked = cat ? !!cat.moderate_all_posts : false;
         document.getElementById('catModal').style.display = 'flex';
@@ -2102,7 +2251,9 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
             icon: document.getElementById('catIcon').value,
             sort_order: parseInt(document.getElementById('catSort').value) || 0,
             is_hidden: document.getElementById('catHidden').checked,
-            moderate_all_posts: document.getElementById('catPremod').checked
+            moderate_all_posts: document.getElementById('catPremod').checked,
+            access_type: document.getElementById('catAccess').value,
+            allowed_group_ids: Array.from(document.querySelectorAll('.cat-group-check:checked')).map(cb => parseInt(cb.value))
         };
         try {
             const r = await fetch('/api/admin/categories' + (editingCategoryId ? '/' + editingCategoryId : ''), {
@@ -2137,6 +2288,46 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
             const d = await r.json();
             if (d.success) location.reload(); else showToast(d.error || 'Failed to add word', 'error');
         } catch { showToast('Failed to add word', 'error'); }
+    }
+    async function createGroup() {
+        const name = document.getElementById('newGroupName').value;
+        if (!name.trim()) return showToast('Group name is required', 'error');
+        try {
+            const r = await fetch('/api/admin/groups', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name }) });
+            const d = await r.json();
+            if (d.success) location.reload(); else showToast(d.error || 'Failed to create group', 'error');
+        } catch { showToast('Failed to create group', 'error'); }
+    }
+    async function deleteGroup(id, btn) {
+        if (!btn.dataset.armed) { btn.dataset.armed = '1'; btn.textContent = 'Confirm?'; setTimeout(() => { btn.textContent = '🗑'; delete btn.dataset.armed; }, 3000); return; }
+        try {
+            const r = await fetch('/api/admin/groups/' + id, { method: 'DELETE' });
+            const d = await r.json();
+            if (d.success) location.reload(); else showToast(d.error || 'Failed to delete group', 'error');
+        } catch { showToast('Failed to delete group', 'error'); }
+    }
+    function toggleGroupMembers(id, btn) {
+        const el = document.getElementById('groupMembers-' + id);
+        const open = el.style.display !== 'none';
+        el.style.display = open ? 'none' : 'block';
+        btn.textContent = open ? 'Members' : 'Close';
+    }
+    async function addGroupMember(id, btn) {
+        const input = btn.parentElement.querySelector('.group-add-input');
+        if (!input.value.trim()) return showToast('Enter a username', 'error');
+        try {
+            const r = await fetch('/api/admin/groups/' + id + '/members', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ username: input.value }) });
+            const d = await r.json();
+            if (d.success) location.reload(); else showToast(d.error || 'Failed to add member', 'error');
+        } catch { showToast('Failed to add member', 'error'); }
+    }
+    async function removeGroupMember(id, btn) {
+        const username = btn.closest('span').dataset.username;
+        try {
+            const r = await fetch('/api/admin/groups/' + id + '/members/' + encodeURIComponent(username), { method: 'DELETE' });
+            const d = await r.json();
+            if (d.success) location.reload(); else showToast(d.error || 'Failed to remove member', 'error');
+        } catch { showToast('Failed to remove member', 'error'); }
     }
     async function deleteWord(id) {
         try {
@@ -2223,6 +2414,33 @@ async function initDatabase() {
         try {
             await pool.execute(`ALTER TABLE categories ADD COLUMN moderate_all_posts BOOLEAN DEFAULT FALSE`);
         } catch (e) { /* exists */ }
+        try {
+            await pool.execute(`ALTER TABLE categories ADD COLUMN access_type ENUM('public','groups') NOT NULL DEFAULT 'public'`);
+        } catch (e) { /* exists */ }
+        try {
+            await pool.execute(`CREATE TABLE IF NOT EXISTS user_groups (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                slug VARCHAR(100) NOT NULL UNIQUE,
+                description VARCHAR(500) DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+            await pool.execute(`CREATE TABLE IF NOT EXISTS user_group_members (
+                user_group_id INT NOT NULL,
+                user_id INT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_group_id, user_id),
+                FOREIGN KEY (user_group_id) REFERENCES user_groups(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+            await pool.execute(`CREATE TABLE IF NOT EXISTS category_groups (
+                category_id INT NOT NULL,
+                user_group_id INT NOT NULL,
+                PRIMARY KEY (category_id, user_group_id),
+                FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
+                FOREIGN KEY (user_group_id) REFERENCES user_groups(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+        } catch (e) { console.error('user groups table warning:', e.message); }
         try {
             await pool.execute(`CREATE TABLE IF NOT EXISTS banned_words (
                 id INT AUTO_INCREMENT PRIMARY KEY,

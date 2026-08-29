@@ -38,8 +38,35 @@ CREATE TABLE IF NOT EXISTS categories (
     post_count INT DEFAULT 0,
     is_hidden BOOLEAN DEFAULT FALSE,
     moderate_all_posts BOOLEAN DEFAULT FALSE,
+    access_type ENUM('public','groups') NOT NULL DEFAULT 'public',
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (parent_id) REFERENCES categories(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- User groups: categories can be restricted to one or more groups
+CREATE TABLE IF NOT EXISTS user_groups (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    slug VARCHAR(100) NOT NULL UNIQUE,
+    description VARCHAR(500) DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS user_group_members (
+    user_group_id INT NOT NULL,
+    user_id INT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (user_group_id, user_id),
+    FOREIGN KEY (user_group_id) REFERENCES user_groups(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS category_groups (
+    category_id INT NOT NULL,
+    user_group_id INT NOT NULL,
+    PRIMARY KEY (category_id, user_group_id),
+    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_group_id) REFERENCES user_groups(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Threads/Discussions table
