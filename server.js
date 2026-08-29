@@ -345,6 +345,7 @@ const threadPageHandler = async (req, res) => {
         } else thread.user_liked = false;
 
         if (!thread) return res.status(404).send(page('Not Found', '<div class="container"><div class="empty-state"><h3>Thread not found</h3></div></div>', req.user));
+        const modCategories = req.user && ['moderator', 'admin'].includes(req.user.role) ? await query('SELECT id, name FROM categories WHERE is_hidden = FALSE ORDER BY name') : [];
 
         const threadTags = await query(`SELECT g.id, g.name, g.slug, g.color FROM tags g JOIN thread_tags tt ON tt.tag_id = g.id WHERE tt.thread_id = ? ORDER BY g.name`, [threadId]);
         const threadTagPills = threadTags.map(g => `<a href="/tag/${g.id}/${g.slug}" class="tag-pill" style="background:${g.color}20;color:${g.color};border-color:${g.color}40">${escapeHtml(g.name)}</a>`).join('');
@@ -500,6 +501,23 @@ const threadPageHandler = async (req, res) => {
                 </form>
             </div>
         </div>
+        <div id="moveModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:1000;align-items:center;justify-content:center;padding:1rem">
+            <div style="background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-lg);width:100%;max-width:420px;padding:1.5rem">
+                <h3 style="margin-bottom:1rem">Move Thread</h3>
+                <input type="hidden" id="moveModalThreadId">
+                <div class="form-group">
+                    <label class="form-label" for="moveModalCategory">New category</label>
+                    <select class="form-input" id="moveModalCategory" data-current="${thread.category_id}" style="width:100%">
+                        ${modCategories.map(c => `<option value="${c.id}" ${c.id === thread.category_id ? 'selected' : ''}>${escapeHtml(c.name)}</option>`).join('')}
+                    </select>
+                    <span class="form-hint">Current category is pre-selected.</span>
+                </div>
+                <div style="display:flex;justify-content:flex-end;gap:0.5rem;margin-top:1rem">
+                    <button type="button" class="btn btn-ghost" onclick="document.getElementById('moveModal').style.display='none'">Cancel</button>
+                    <button type="button" class="btn btn-primary" onclick="submitMove()">Move Thread</button>
+                </div>
+            </div>
+        </div>
         <script>
         function openEditModal(type, id) {
             fetch('/api/' + (type === 'thread' ? 'threads' : 'replies') + '/' + id + '/raw')
@@ -524,8 +542,15 @@ const threadPageHandler = async (req, res) => {
                 .catch(() => showToast('Delete failed', 'error'));
         }
         async function modMove(threadId) {
-            const categoryId = prompt('Move to category ID:' + (typeof MOD_CATEGORIES !== 'undefined' ? ' ' + MOD_CATEGORIES : ''), '1');
-            if (!categoryId) return;
+            document.getElementById('moveModalThreadId').value = threadId;
+            const sel = document.getElementById('moveModalCategory');
+            sel.value = sel.dataset.current || sel.options[0].value;
+            document.getElementById('moveModal').style.display = 'flex';
+        }
+        async function submitMove() {
+            const threadId = document.getElementById('moveModalThreadId').value;
+            const categoryId = document.getElementById('moveModalCategory').value;
+            document.getElementById('moveModal').style.display = 'none';
             const r = await fetch('/api/threads/' + threadId + '/move', { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ category_id: parseInt(categoryId) }) });
             const d = await r.json();
             if (d.success) location.reload(); else showToast(d.error || 'Move failed', 'error');
