@@ -425,6 +425,7 @@ const threadPageHandler = async (req, res) => {
                             ${editActions}
                             ${modActions}
                             ${deleteAction}
+                            ${req.user && !(isAuthor && !isThread) && !isMod ? `<button onclick="reportPost('${isThread ? 'thread' : 'reply'}', ${p.id})" title="Report">⚑</button>` : ''}
                         </div>
                     </div>
                     <div class="post-content markdown-body">${renderMarkdown(p.content)}</div>
@@ -581,6 +582,14 @@ const threadPageHandler = async (req, res) => {
             const r = await fetch('/api/threads/' + threadId + '/merge', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ source_id: parseInt(sourceId) }) });
             const d = await r.json();
             if (d.success) location.reload(); else showToast(d.error || 'Merge failed', 'error');
+        }
+        function reportPost(type, id) {
+            const reason = prompt('Why are you reporting this post? (optional):');
+            if (reason === null) return;
+            fetch('/api/reports', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ target_type: type, target_id: id, reason }) })
+                .then(r => r.json())
+                .then(d => d.success ? showToast(d.message, 'success') : showToast(d.error || 'Report failed', 'error'))
+                .catch(() => showToast('Report failed', 'error'));
         }
         document.getElementById('editModalForm').addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -1545,6 +1554,19 @@ app.get('/moderate', requireRole(['moderator', 'admin']), async (req, res) => {
             SELECT r.id, r.content, r.created_at, t.id as thread_id, t.title as thread_title, u.username
             FROM replies r JOIN threads t ON t.id = r.thread_id JOIN users u ON u.id = r.user_id
             ORDER BY r.created_at DESC LIMIT 100`);
+        const reports = await query(`
+            SELECT rp.*, u.username as reporter_username,
+                   t.title as thread_title, t.slug as thread_slug, tu.username as thread_author,
+                   rc.content as reply_content, rru.username as reply_author, rt.title as reply_thread_title, rt.slug as reply_thread_slug, rt.id as reply_thread_id
+            FROM reports rp
+            JOIN users u ON u.id = rp.reporter_id
+            LEFT JOIN threads t ON rp.target_type = 'thread' AND rp.target_id = t.id
+            LEFT JOIN users tu ON tu.id = t.user_id
+            LEFT JOIN replies rc ON rp.target_type = 'reply' AND rp.target_id = rc.id
+            LEFT JOIN users rru ON rru.id = rc.user_id
+            LEFT JOIN threads rt ON rt.id = rc.thread_id
+            WHERE rp.status = 'pending'
+            ORDER BY rp.created_at ASC`);
 
         const catOptions = cats.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
 
@@ -1573,6 +1595,28 @@ app.get('/moderate', requireRole(['moderator', 'admin']), async (req, res) => {
                 <div class="thread-meta" style="flex-shrink:0"><span>@${escapeHtml(r.username)}</span><span>${timeAgo(r.created_at)}</span></div>
             </div>`).join('');
 
+        const reportRows = reports.length === 0 ? '<div class="empty-state" style="padding:1.5rem">No pending reports</div>' : reports.map(rp => {
+            const isThread = rp.target_type === 'thread';
+            const link = isThread ? `/t/${rp.target_id}/${rp.thread_slug}` : `/t/${rp.reply_thread_id}/${rp.reply_thread_slug}`;
+            const content = isThread ? rp.thread_title : rp.reply_content;
+            const author = isThread ? rp.thread_author : rp.reply_author;
+            return `
+            <div class="thread-card" style="padding:1rem;align-items:center;border-left:3px solid var(--warning)">
+                <div class="thread-content" style="flex:1">
+                    <div style="font-size:0.9rem"><strong>${isThread ? 'Thread' : 'Reply'}</strong> by @${escapeHtml(author || '[deleted]')}: ${escapeHtml((content || '[content no longer exists]').slice(0, 140))}${content && content.length > 140 ? '…' : ''}</div>
+                    <div class="thread-meta">
+                        <a href="${link}">view post</a>
+                        <span>reported by @${escapeHtml(rp.reporter_username)} ${timeAgo(rp.created_at)}</span>
+                        ${rp.reason ? `<span style="color:var(--warning)">reason: ${escapeHtml(rp.reason)}</span>` : ''}
+                    </div>
+                </div>
+                <div style="display:flex;gap:0.5rem;flex-shrink:0">
+                    <button class="btn btn-danger btn-sm" onclick="handleReport(${rp.id}, 'delete')">🗑 Delete</button>
+                    <button class="btn btn-ghost btn-sm" onclick="handleReport(${rp.id}, 'dismiss')">Dismiss</button>
+                </div>
+            </div>`;
+        }).join('');
+
         const body = `
         <div class="container" style="padding-top:2rem;max-width:1100px">
             <div class="thread-header"><h1>Moderation</h1><div class="thread-info"><span>Select items, then choose an action. Bulk merge folds every selected thread into the lowest selected thread ID.</span></div></div>
@@ -1588,18 +1632,30 @@ app.get('/moderate', requireRole(['moderator', 'admin']), async (req, res) => {
                 <span style="margin-left:auto;color:var(--text-muted);font-size:0.8rem" id="modStatus"></span>
             </div>
             <div style="display:flex;gap:0.75rem;margin-bottom:1rem">
-                <button class="btn btn-ghost" id="tabThreads" onclick="showTab('threads')" style="font-weight:700">Threads</button>
+                <button class="btn btn-ghost" id="tabReports" onclick="showTab('reports')" style="font-weight:700">⚑ Reports (${reports.length})</button>
+                <button class="btn btn-ghost" id="tabThreads" onclick="showTab('threads')">Threads</button>
                 <button class="btn btn-ghost" id="tabReplies" onclick="showTab('replies')">Replies</button>
             </div>
-            <div id="sectionThreads" class="thread-list">${threadRows || '<div class="empty-state">No threads</div>'}</div>
+            <div id="sectionReports" class="thread-list">${reportRows}</div>
+            <div id="sectionThreads" class="thread-list" style="display:none">${threadRows || '<div class="empty-state">No threads</div>'}</div>
             <div id="sectionReplies" class="thread-list" style="display:none">${replyRows || '<div class="empty-state">No replies</div>'}</div>
         </div>
         <script>
         function showTab(which) {
             document.getElementById('sectionThreads').style.display = which === 'threads' ? '' : 'none';
             document.getElementById('sectionReplies').style.display = which === 'replies' ? '' : 'none';
+            document.getElementById('sectionReports').style.display = which === 'reports' ? '' : 'none';
             document.getElementById('tabThreads').style.fontWeight = which === 'threads' ? '700' : '400';
             document.getElementById('tabReplies').style.fontWeight = which === 'replies' ? '700' : '400';
+            document.getElementById('tabReports').style.fontWeight = which === 'reports' ? '700' : '400';
+        }
+        async function handleReport(id, action) {
+            if (action === 'delete' && !confirm('Delete the reported content? This cannot be undone.')) return;
+            try {
+                const r = await fetch('/api/mod/reports/' + id + '/resolve', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ action }) });
+                const d = await r.json();
+                if (d.success) location.reload(); else showToast(d.error || 'Action failed', 'error');
+            } catch { showToast('Action failed', 'error'); }
         }
         function selected(type) {
             return [...document.querySelectorAll('.mod-check:checked')].filter(c => c.dataset.type === type).map(c => c.value);
@@ -1798,6 +1854,23 @@ async function initDatabase() {
         try {
             await pool.execute('ALTER TABLE users ADD COLUMN banned_until DATETIME DEFAULT NULL, ADD COLUMN ban_reason VARCHAR(500) DEFAULT NULL');
         } catch (e) { /* column(s) already exist */ }
+        try {
+            await pool.execute(`CREATE TABLE IF NOT EXISTS reports (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                reporter_id INT NOT NULL,
+                target_type ENUM('thread','reply') NOT NULL,
+                target_id INT NOT NULL,
+                reason VARCHAR(500) DEFAULT NULL,
+                status ENUM('pending','resolved','dismissed') DEFAULT 'pending',
+                resolved_by INT DEFAULT NULL,
+                resolved_at DATETIME DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_reporter (reporter_id),
+                INDEX idx_target (target_type, target_id),
+                INDEX idx_status (status),
+                FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+        } catch (e) { console.error('Reports table warning:', e.message); }
         console.log('✅ Database initialized');
 
         // Seed sample data if empty

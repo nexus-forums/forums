@@ -354,6 +354,73 @@ router.delete('/api/replies/:id', requireAuth, async (req, res) => {
     }
 });
 
+// Report a thread or reply (any authenticated user)
+router.post('/api/reports', requireAuth, async (req, res) => {
+    try {
+        const { target_type, target_id, reason } = await req.json();
+        if (!['thread', 'reply'].includes(target_type)) return res.status(400).json({ success: false, error: 'Invalid target type' });
+        const tid = parseInt(target_id);
+        if (isNaN(tid)) return res.status(400).json({ success: false, error: 'Invalid target' });
+        const table = target_type === 'thread' ? 'threads' : 'replies';
+        const [exists] = await query(`SELECT id FROM ${table} WHERE id = ?`, [tid]);
+        if (!exists) return res.status(404).json({ success: false, error: 'Post not found' });
+        const [dupe] = await query('SELECT id FROM reports WHERE reporter_id = ? AND target_type = ? AND target_id = ? AND status = "pending"', [req.user.id, target_type, tid]);
+        if (dupe) return res.status(400).json({ success: false, error: 'You have already reported this post' });
+        await query('INSERT INTO reports (reporter_id, target_type, target_id, reason) VALUES (?, ?, ?, ?)', [req.user.id, target_type, tid, (reason || '').toString().slice(0, 500) || null]);
+        res.json({ success: true, message: 'Post reported. A moderator will review it.' });
+    } catch (error) {
+        console.error('Report error:', error);
+        res.status(500).json({ success: false, error: 'Report failed' });
+    }
+});
+
+// Resolve a report — delete content or dismiss (mod/admin)
+router.post('/api/mod/reports/:id/resolve', requireRole(['moderator', 'admin']), async (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const { action } = await req.json();
+        const [report] = await query('SELECT id, target_type, target_id, status FROM reports WHERE id = ?', [id]);
+        if (!report) return res.status(404).json({ success: false, error: 'Report not found' });
+        if (report.status !== 'pending') return res.status(400).json({ success: false, error: 'Report already handled' });
+
+        if (action === 'delete') {
+            if (report.target_type === 'thread') {
+                await transaction(async conn => {
+                    const [t] = await conn.execute('SELECT category_id FROM threads WHERE id = ?', [report.target_id]);
+                    if (t.length) {
+                        const [rc] = await conn.execute('SELECT COUNT(*) AS c FROM replies WHERE thread_id = ?', [report.target_id]);
+                        await conn.execute('DELETE r FROM reactions r JOIN replies rp ON r.target_type = "reply" AND r.target_id = rp.id WHERE rp.thread_id = ?', [report.target_id]);
+                        await conn.execute('DELETE FROM reactions WHERE target_type = "thread" AND target_id = ?', [report.target_id]);
+                        await conn.execute('DELETE FROM replies WHERE thread_id = ?', [report.target_id]);
+                        await conn.execute('DELETE FROM thread_tags WHERE thread_id = ?', [report.target_id]);
+                        await conn.execute('DELETE FROM threads WHERE id = ?', [report.target_id]);
+                        await conn.execute('UPDATE categories SET thread_count = GREATEST(thread_count - 1, 0), post_count = GREATEST(post_count - ?, 0) WHERE id = ?', [rc[0].c + 1, t[0].category_id]);
+                    }
+                });
+            } else {
+                const [r] = await query('SELECT r.id, r.thread_id, t.category_id FROM replies r JOIN threads t ON t.id = r.thread_id WHERE r.id = ?', [report.target_id]);
+                if (r) {
+                    await transaction(async conn => {
+                        await conn.execute('DELETE FROM reactions WHERE target_type = "reply" AND target_id = ?', [report.target_id]);
+                        await conn.execute('DELETE FROM replies WHERE id = ?', [report.target_id]);
+                        const [c] = await conn.execute('SELECT COUNT(*) AS c FROM replies WHERE thread_id = ?', [r.thread_id]);
+                        await conn.execute('UPDATE threads SET reply_count = ? WHERE id = ?', [c[0].c, r.thread_id]);
+                        await conn.execute('UPDATE categories SET post_count = GREATEST(post_count - 1, 0) WHERE id = ?', [r.category_id]);
+                    });
+                }
+            }
+        } else if (action !== 'dismiss') {
+            return res.status(400).json({ success: false, error: 'Unknown action' });
+        }
+
+        await query('UPDATE reports SET status = ?, resolved_by = ?, resolved_at = NOW() WHERE id = ?', [action === 'delete' ? 'resolved' : 'dismissed', req.user.id, id]);
+        res.json({ success: true, message: action === 'delete' ? 'Content deleted and report resolved' : 'Report dismissed' });
+    } catch (error) {
+        console.error('Resolve report error:', error);
+        res.status(500).json({ success: false, error: 'Resolve failed' });
+    }
+});
+
 // Bulk moderation (threads or replies) — mod/admin
 router.post('/api/mod/bulk', requireRole(['moderator', 'admin']), async (req, res) => {
     try {

@@ -195,6 +195,23 @@ CREATE TABLE IF NOT EXISTS views (
     INDEX idx_viewed_at (viewed_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Reports table
+CREATE TABLE IF NOT EXISTS reports (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    reporter_id INT NOT NULL,
+    target_type ENUM('thread','reply') NOT NULL,
+    target_id INT NOT NULL,
+    reason VARCHAR(500) DEFAULT NULL,
+    status ENUM('pending','resolved','dismissed') DEFAULT 'pending',
+    resolved_by INT DEFAULT NULL,
+    resolved_at DATETIME DEFAULT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_reporter (reporter_id),
+    INDEX idx_target (target_type, target_id),
+    INDEX idx_status (status),
+    FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Insert default categories
 INSERT IGNORE INTO categories (name, slug, description, color, icon, sort_order) VALUES
 ('General Discussion', 'general', 'Talk about anything and everything', '#6366f1', 'message-circle', 1),
