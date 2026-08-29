@@ -403,8 +403,10 @@ const threadPageHandler = async (req, res) => {
             <div class="post ${isThread ? 'thread-post' : ''}">
                 <div class="post-author">
                     <img src="${p.avatar || generateAvatar(p.username || p.display_name)}" alt="${p.username}" class="author-avatar" width="64" height="64">
-                    <a href="/u/${p.username}" class="author-name">${escapeHtml(p.display_name || p.username)}</a>
-                    ${roleBadge}
+                    <div class="author-identity">
+                        <a href="/u/${p.username}" class="author-name">${escapeHtml(p.display_name || p.username)}</a>
+                        ${roleBadge}
+                    </div>
                     <div class="author-stats">
                         <div><span class="author-rep">${p.reputation}</span></div>
                         <div>${p.post_count} posts</div>
@@ -510,6 +512,7 @@ const threadPageHandler = async (req, res) => {
                             <button type="button" data-action="bold">B</button>
                             <button type="button" data-action="italic">I</button>
                             <button type="button" data-action="link">🔗</button>
+                            <button type="button" data-action="image">🖼</button>
                             <button type="button" data-action="code">&lt;/&gt;</button>
                             <button type="button" data-action="quote">"</button>
                         </div>
@@ -754,6 +757,7 @@ app.get('/new', authenticate, async (req, res) => {
                     <button type="button" data-action="bold">B</button>
                     <button type="button" data-action="italic">I</button>
                     <button type="button" data-action="link">🔗</button>
+                    <button type="button" data-action="image">🖼</button>
                     <button type="button" data-action="code">&lt;/&gt;</button>
                     <button type="button" data-action="quote">"</button>
                 </div>

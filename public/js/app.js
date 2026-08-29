@@ -175,6 +175,7 @@
                     case 'bold': replacement = `**${selected || 'bold text'}**`; break;
                     case 'italic': replacement = `*${selected || 'italic text'}*`; break;
                     case 'link': replacement = `[${selected || 'link text'}](url)`; break;
+                    case 'image': replacement = `![${selected || 'image alt'}](https://example.com/image.jpg)`; break;
                     case 'code': replacement = `\`\`\`\n${selected || 'code'}\n\`\`\``; break;
                     case 'quote': replacement = `> ${selected || 'quote'}`; break;
                 }
