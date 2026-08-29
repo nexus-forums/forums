@@ -1678,7 +1678,29 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
     const bannedUsers = await query(`SELECT u.id, u.username, u.display_name, u.email, u.banned_until, u.ban_reason, u.created_at, a.username as banned_by
         FROM users u LEFT JOIN users a ON a.id = u.id WHERE u.is_banned = TRUE ORDER BY u.banned_until IS NULL DESC, u.banned_until DESC`);
 
+    const searchQ = (req.query.q || '').toString().trim().slice(0, 100);
+    const pageNum = Math.max(1, parseInt(req.query.page) || 1);
+    const perPage = 20;
+    const userWhere = searchQ ? 'WHERE username LIKE ? OR display_name LIKE ? OR email LIKE ?' : '';
+    const searchParams = searchQ ? [`%${searchQ}%`, `%${searchQ}%`, `%${searchQ}%`] : [];
+    const [totalUsers] = await query(`SELECT COUNT(*) as c FROM users ${userWhere}`, searchParams);
+    const userPages = Math.max(1, Math.ceil(totalUsers.c / perPage));
+    const listedUsers = await query(`SELECT id, username, display_name, email, created_at, role, is_banned, banned_until, ban_reason FROM users ${userWhere} ORDER BY created_at DESC LIMIT ? OFFSET ?`, [...searchParams, perPage, (pageNum - 1) * perPage]);
+
     const banStatus = u => u.banned_until ? `temp (until ${new Date(u.banned_until).toISOString().slice(0, 10)})` : 'permanent';
+
+    let paginationHtml = '';
+    if (userPages > 1) {
+        paginationHtml = '<div class="pagination">';
+        if (pageNum > 1) paginationHtml += `<a href="/admin?q=${encodeURIComponent(searchQ)}&page=${pageNum - 1}">←</a>`;
+        for (let i = 1; i <= userPages; i++) {
+            if (i === pageNum) paginationHtml += `<span class="current">${i}</span>`;
+            else if (i === 1 || i === userPages || Math.abs(i - pageNum) <= 2) paginationHtml += `<a href="/admin?q=${encodeURIComponent(searchQ)}&page=${i}">${i}</a>`;
+            else if (Math.abs(i - pageNum) === 3) paginationHtml += '<span class="ellipsis">…</span>';
+        }
+        if (pageNum < userPages) paginationHtml += `<a href="/admin?q=${encodeURIComponent(searchQ)}&page=${pageNum + 1}">→</a>`;
+        paginationHtml += '</div>';
+    }
 
     const body = `
     <div class="container" style="padding-top:2rem">
@@ -1700,9 +1722,14 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
                     <button class="btn btn-ghost btn-sm" onclick="unbanUser(${u.id})">Unban</button>
                 </div>`).join('')}
         </div>
-        <h2 style="margin-bottom:1rem">Recent Users</h2>
-        <div class="thread-list">
-            ${recentUsers.map(u => `
+        <h2 style="margin-bottom:1rem">User Management <span style="font-size:0.85rem;font-weight:400;color:var(--text-muted)">${totalUsers.c} user${totalUsers.c === 1 ? '' : 's'}${searchQ ? ` found for "${escapeHtml(searchQ)}"` : ''}</span></h2>
+        <form method="GET" action="/admin" style="display:flex;gap:0.5rem;margin-bottom:1rem">
+            <input class="form-input" type="text" name="q" value="${escapeHtml(searchQ)}" placeholder="Search by username, display name, or email…" style="max-width:360px">
+            <button type="submit" class="btn btn-primary btn-sm">Search</button>
+            ${searchQ ? `<a href="/admin" class="btn btn-ghost btn-sm" style="align-self:center">Clear</a>` : ''}
+        </form>
+        <div class="thread-list" style="margin-bottom:2rem">
+            ${listedUsers.length === 0 ? '<div class="empty-state" style="padding:1.5rem">No users match that search</div>' : listedUsers.map(u => `
                 <div class="thread-card" style="padding:1rem;align-items:center">
                     <div class="thread-content" style="flex:1">
                         <h4>${escapeHtml(u.display_name || u.username)} <span style="color:var(--text-muted);font-size:0.8rem;font-weight:400">@${u.username} • ${u.email}${u.role !== 'user' ? ` • ${u.role}` : ''}${u.is_banned ? ` • <span style=\"color:var(--danger)\">banned: ${banStatus(u)}</span>` : ''}</span></h4>
@@ -1716,6 +1743,7 @@ app.get('/admin', requireRole(['admin']), async (req, res) => {
                 </div>
             `).join('')}
         </div>
+        ${paginationHtml}
     </div>
     <script>
     async function banUser(id) {
