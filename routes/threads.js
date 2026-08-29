@@ -259,6 +259,181 @@ router.patch('/api/threads/:id/lock', requireRole(['moderator', 'admin']), async
     }
 });
 
+// Delete thread (mod/admin)
+router.delete('/api/threads/:id', requireRole(['moderator', 'admin']), async (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const [t] = await query('SELECT id, category_id FROM threads WHERE id = ?', [id]);
+        if (!t) return res.status(404).json({ success: false, error: 'Thread not found' });
+        await transaction(async conn => {
+            const [replyRows] = await conn.execute('SELECT id, COUNT(*) AS c FROM replies WHERE thread_id = ?', [id]);
+            const replyCount = replyRows.length ? replyRows[0].c : 0;
+            await conn.execute('DELETE r FROM reactions r JOIN replies rp ON r.target_type = "reply" AND r.target_id = rp.id WHERE rp.thread_id = ?', [id]);
+            await conn.execute('DELETE FROM reactions WHERE target_type = "thread" AND target_id = ?', [id]);
+            await conn.execute('DELETE FROM replies WHERE thread_id = ?', [id]);
+            await conn.execute('DELETE FROM thread_tags WHERE thread_id = ?', [id]);
+            await conn.execute('DELETE FROM threads WHERE id = ?', [id]);
+            await conn.execute('UPDATE categories SET thread_count = GREATEST(thread_count - 1, 0), post_count = GREATEST(post_count - ?, 0) WHERE id = ?', [replyCount + 1, t.category_id]);
+        });
+        res.json({ success: true, message: 'Thread deleted' });
+    } catch (error) {
+        console.error('Delete thread error:', error);
+        res.status(500).json({ success: false, error: 'Failed to delete thread' });
+    }
+});
+
+// Move thread to another category (mod/admin)
+router.patch('/api/threads/:id/move', requireRole(['moderator', 'admin']), async (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const { category_id } = await req.json();
+        const [cat] = await query('SELECT id FROM categories WHERE id = ?', [parseInt(category_id)]);
+        if (!cat) return res.status(400).json({ success: false, error: 'Invalid category' });
+        const [t] = await query('SELECT id, category_id FROM threads WHERE id = ?', [id]);
+        if (!t) return res.status(404).json({ success: false, error: 'Thread not found' });
+        if (t.category_id === cat.id) return res.json({ success: true, message: 'Thread already in that category' });
+        await transaction(async conn => {
+            await conn.execute('UPDATE threads SET category_id = ? WHERE id = ?', [cat.id, id]);
+            await conn.execute('UPDATE categories SET thread_count = GREATEST(thread_count - 1, 0) WHERE id = ?', [t.category_id]);
+            await conn.execute('UPDATE categories SET thread_count = thread_count + 1 WHERE id = ?', [cat.id]);
+        });
+        res.json({ success: true, message: 'Thread moved' });
+    } catch (error) {
+        console.error('Move thread error:', error);
+        res.status(500).json({ success: false, error: 'Failed to move thread' });
+    }
+});
+
+// Merge source thread into target thread (mod/admin)
+router.post('/api/threads/:id/merge', requireRole(['moderator', 'admin']), async (req, res) => {
+    try {
+        const targetId = parseInt(req.params.id);
+        const { source_id } = await req.json();
+        const sourceId = parseInt(source_id);
+        if (isNaN(sourceId) || sourceId === targetId) return res.status(400).json({ success: false, error: 'Invalid source thread' });
+        const [target] = await query('SELECT id, category_id, reply_count, views FROM threads WHERE id = ?', [targetId]);
+        const [source] = await query('SELECT id, category_id, reply_count, views FROM threads WHERE id = ?', [sourceId]);
+        if (!target || !source) return res.status(404).json({ success: false, error: 'Thread not found' });
+        await transaction(async conn => {
+            await conn.execute('UPDATE replies SET thread_id = ? WHERE thread_id = ?', [targetId, sourceId]);
+            await conn.execute('DELETE r FROM reactions r JOIN replies rp ON r.target_type = "reply" AND r.target_id = rp.id WHERE rp.thread_id = ?', [sourceId]);
+            await conn.execute('DELETE FROM reactions WHERE target_type = "thread" AND target_id = ?', [sourceId]);
+            await conn.execute('DELETE FROM threads WHERE id = ?', [sourceId]);
+            const [merged] = await conn.execute('SELECT COUNT(*) AS c FROM replies WHERE thread_id = ?', [targetId]);
+            await conn.execute('UPDATE threads SET reply_count = ?, views = views + ?, last_post_at = GREATEST(last_post_at, NOW()) WHERE id = ?', [merged[0].c, source.views, targetId]);
+            if (source.category_id !== target.category_id) {
+                await conn.execute('UPDATE categories SET thread_count = GREATEST(thread_count - 1, 0) WHERE id = ?', [source.category_id]);
+            }
+        });
+        res.json({ success: true, message: 'Threads merged' });
+    } catch (error) {
+        console.error('Merge thread error:', error);
+        res.status(500).json({ success: false, error: 'Failed to merge threads' });
+    }
+});
+
+// Delete reply (author or mod/admin)
+router.delete('/api/replies/:id', requireAuth, async (req, res) => {
+    try {
+        const id = parseInt(req.params.id);
+        const [r] = await query('SELECT r.id, r.user_id, r.thread_id, t.category_id, t.user_id AS thread_author FROM replies r JOIN threads t ON t.id = r.thread_id WHERE r.id = ?', [id]);
+        if (!r) return res.status(404).json({ success: false, error: 'Reply not found' });
+        const isMod = ['moderator', 'admin'].includes(req.user.role);
+        if (r.user_id !== req.user.id && !isMod) return res.status(403).json({ success: false, error: 'Not allowed' });
+        await transaction(async conn => {
+            await conn.execute('DELETE FROM reactions WHERE target_type = "reply" AND target_id = ?', [id]);
+            await conn.execute('DELETE FROM replies WHERE id = ?', [id]);
+            const [c] = await conn.execute('SELECT COUNT(*) AS c FROM replies WHERE thread_id = ?', [r.thread_id]);
+            await conn.execute('UPDATE threads SET reply_count = ? WHERE id = ?', [c[0].c, r.thread_id]);
+            await conn.execute('UPDATE categories SET post_count = GREATEST(post_count - 1, 0) WHERE id = ?', [r.category_id]);
+        });
+        res.json({ success: true, message: 'Reply deleted' });
+    } catch (error) {
+        console.error('Delete reply error:', error);
+        res.status(500).json({ success: false, error: 'Failed to delete reply' });
+    }
+});
+
+// Bulk moderation (threads or replies) — mod/admin
+router.post('/api/mod/bulk', requireRole(['moderator', 'admin']), async (req, res) => {
+    try {
+        const { type, ids, action, category_id } = await req.json();
+        if (!['threads', 'replies'].includes(type) || !Array.isArray(ids) || ids.length === 0) {
+            return res.status(400).json({ success: false, error: 'Invalid type or ids' });
+        }
+        const parsed = ids.map(x => parseInt(x)).filter(x => !isNaN(x));
+        if (parsed.length === 0) return res.status(400).json({ success: false, error: 'No valid ids' });
+        const placeholders = parsed.map(() => '?').join(',');
+
+        if (type === 'threads') {
+            switch (action) {
+                case 'pin':
+                    await query(`UPDATE threads SET is_pinned = TRUE WHERE id IN (${placeholders})`, parsed);
+                    break;
+                case 'unpin':
+                    await query(`UPDATE threads SET is_pinned = FALSE WHERE id IN (${placeholders})`, parsed);
+                    break;
+                case 'lock':
+                    await query(`UPDATE threads SET is_locked = TRUE WHERE id IN (${placeholders})`, parsed);
+                    break;
+                case 'unlock':
+                    await query(`UPDATE threads SET is_locked = FALSE WHERE id IN (${placeholders})`, parsed);
+                    break;
+                case 'move': {
+                    const [cat] = await query('SELECT id FROM categories WHERE id = ?', [parseInt(category_id)]);
+                    if (!cat) return res.status(400).json({ success: false, error: 'Invalid category' });
+                    await transaction(async conn => {
+                        const [oldCounts] = await conn.execute(`SELECT category_id, COUNT(*) AS c FROM threads WHERE id IN (${placeholders}) GROUP BY category_id`, parsed);
+                        for (const row of oldCounts) {
+                            await conn.execute('UPDATE categories SET thread_count = GREATEST(thread_count - ?, 0) WHERE id = ?', [row.c, row.category_id]);
+                        }
+                        await conn.execute(`UPDATE threads SET category_id = ? WHERE id IN (${placeholders})`, [cat.id, ...parsed]);
+                        await conn.execute('UPDATE categories SET thread_count = thread_count + ? WHERE id = ?', [parsed.length, cat.id]);
+                    });
+                    break;
+                }
+                case 'delete':
+                    await transaction(async conn => {
+                        const [stats] = await conn.execute(`SELECT category_id, COUNT(*) AS c, SUM(reply_count) AS replies FROM threads WHERE id IN (${placeholders})`, parsed);
+                        const total = parsed.length + (stats[0].replies || 0);
+                        await conn.execute('DELETE r FROM reactions r JOIN replies rp ON r.target_type = "reply" AND r.target_id = rp.id WHERE rp.thread_id IN (' + placeholders + ')', parsed);
+                        await conn.execute(`DELETE FROM reactions WHERE target_type = "thread" AND target_id IN (${placeholders})`, parsed);
+                        await conn.execute(`DELETE FROM replies WHERE thread_id IN (${placeholders})`, parsed);
+                        await conn.execute(`DELETE FROM thread_tags WHERE thread_id IN (${placeholders})`, parsed);
+                        await conn.execute(`DELETE FROM threads WHERE id IN (${placeholders})`, parsed);
+                        if (stats[0].category_id) {
+                            await conn.execute('UPDATE categories SET thread_count = GREATEST(thread_count - ?, 0), post_count = GREATEST(post_count - ?, 0) WHERE id = ?', [parsed.length, total, stats[0].category_id]);
+                        }
+                    });
+                    break;
+                default:
+                    return res.status(400).json({ success: false, error: 'Unknown action' });
+            }
+        } else {
+            // replies
+            if (action !== 'delete') return res.status(400).json({ success: false, error: 'For replies only the "delete" action is supported' });
+            await transaction(async conn => {
+                const [rows] = await conn.execute(`SELECT id, thread_id FROM replies WHERE id IN (${placeholders})`, parsed);
+                if (rows.length === 0) return res.json({ success: true, message: 'Nothing to delete', affected: 0 });
+                const rIds = rows.map(r => r.id);
+                const rp = rIds.map(() => '?').join(',');
+                await conn.execute(`DELETE FROM reactions WHERE target_type = "reply" AND target_id IN (${rp})`, rIds);
+                await conn.execute(`DELETE FROM replies WHERE id IN (${rp})`, rIds);
+                const threadIds = [...new Set(rows.map(r => r.thread_id))];
+                for (const tid of threadIds) {
+                    const [c] = await conn.execute('SELECT COUNT(*) AS c FROM replies WHERE thread_id = ?', [tid]);
+                    await conn.execute('UPDATE threads SET reply_count = ? WHERE id = ?', [c[0].c, tid]);
+                }
+                await conn.execute('UPDATE categories SET post_count = GREATEST(post_count - ?, 0) WHERE id = (SELECT category_id FROM threads WHERE id = ?)', [rIds.length, threadIds[0]]);
+            });
+        }
+        res.json({ success: true, message: `Bulk ${action} applied to ${parsed.length} ${type}` });
+    } catch (error) {
+        console.error('Bulk mod error:', error);
+        res.status(500).json({ success: false, error: 'Bulk action failed' });
+    }
+});
+
 // Mark as solution (thread author or mod/admin)
 // Edit thread (title/content) — author or mod
 router.patch('/api/threads/:id', requireAuth, async (req, res) => {

@@ -373,7 +373,10 @@ const threadPageHandler = async (req, res) => {
             const modActions = isMod ? `
                 <button onclick="fetch('/api/threads/${thread.id}/lock',{method:'PATCH'}).then(()=>location.reload())" title="${thread.is_locked ? 'Unlock' : 'Lock'}">🔒</button>
                 <button onclick="fetch('/api/threads/${thread.id}/pin',{method:'PATCH'}).then(()=>location.reload())" title="${thread.is_pinned ? 'Unpin' : 'Pin'}">📌</button>
+                <button onclick="modMove(${thread.id})" title="Move to category…">📦</button>
+                <button onclick="modMerge(${thread.id})" title="Merge another thread into this one">🔗</button>
             ` : '';
+            const deleteAction = isMod ? `<button onclick="modDelete('${isThread ? 'threads' : 'replies'}', ${p.id})" title="Delete">🗑</button>` : (req.user && !isThread && req.user.id === p.user_id ? `<button onclick="modDelete('replies', ${p.id})" title="Delete">🗑</button>` : '');
             const editActions = (isAuthor || isMod) ? `<button onclick="openEditModal('${isThread ? 'thread' : 'reply'}', ${p.id})" title="Edit">✏️</button>` : '';
             return `
             <div class="post ${isThread ? 'thread-post' : ''}">
@@ -400,6 +403,7 @@ const threadPageHandler = async (req, res) => {
                             ${!isThread && (req.user?.id === thread.user_id || isMod) ? `<button onclick="fetch('/api/replies/${p.id}/solution',{method:'PATCH'}).then(()=>location.reload())" title="Mark as solution">✓</button>` : ''}
                             ${editActions}
                             ${modActions}
+                            ${deleteAction}
                         </div>
                     </div>
                     <div class="post-content markdown-body">${renderMarkdown(p.content)}</div>
@@ -512,6 +516,27 @@ const threadPageHandler = async (req, res) => {
                 .catch(() => showToast('Cannot load post', 'error'));
         }
         function closeEditModal() { document.getElementById('editModal').style.display = 'none'; }
+        function modDelete(type, id) {
+            if (!confirm('Permanently delete this ' + (type === 'threads' ? 'thread (including all replies)' : 'reply') + '?')) return;
+            fetch('/api/' + type + '/' + id, { method: 'DELETE' })
+                .then(r => r.json())
+                .then(d => { if (d.success) { if (type === 'threads') location.href = '/'; else location.reload(); } else showToast(d.error || 'Delete failed', 'error'); })
+                .catch(() => showToast('Delete failed', 'error'));
+        }
+        async function modMove(threadId) {
+            const categoryId = prompt('Move to category ID:' + (typeof MOD_CATEGORIES !== 'undefined' ? ' ' + MOD_CATEGORIES : ''), '1');
+            if (!categoryId) return;
+            const r = await fetch('/api/threads/' + threadId + '/move', { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ category_id: parseInt(categoryId) }) });
+            const d = await r.json();
+            if (d.success) location.reload(); else showToast(d.error || 'Move failed', 'error');
+        }
+        async function modMerge(threadId) {
+            const sourceId = prompt('Merge which thread INTO this one? Enter the source thread ID:');
+            if (!sourceId) return;
+            const r = await fetch('/api/threads/' + threadId + '/merge', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ source_id: parseInt(sourceId) }) });
+            const d = await r.json();
+            if (d.success) location.reload(); else showToast(d.error || 'Merge failed', 'error');
+        }
         document.getElementById('editModalForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const type = document.getElementById('editModalType').value;
@@ -1460,6 +1485,107 @@ app.get('/notifications', authenticate, async (req, res) => {
 
     res.header('Content-Type', 'text/html');
     res.send(page('Notifications', body, req.user));
+});
+
+// Moderation console (mod/admin)
+app.get('/moderate', requireRole(['moderator', 'admin']), async (req, res) => {
+    try {
+        const cats = await query('SELECT id, name FROM categories WHERE is_hidden = FALSE ORDER BY name');
+        const threads = await query(`
+            SELECT t.id, t.title, t.slug, t.is_pinned, t.is_locked, t.reply_count, t.views, t.created_at,
+                   c.name as category_name, u.username
+            FROM threads t JOIN categories c ON c.id = t.category_id JOIN users u ON u.id = t.user_id
+            ORDER BY t.created_at DESC LIMIT 100`);
+        const replies = await query(`
+            SELECT r.id, r.content, r.created_at, t.id as thread_id, t.title as thread_title, u.username
+            FROM replies r JOIN threads t ON t.id = r.thread_id JOIN users u ON u.id = r.user_id
+            ORDER BY r.created_at DESC LIMIT 100`);
+
+        const catOptions = cats.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+
+        const threadRows = threads.map(t => `
+            <div class="thread-card mod-row" style="align-items:center">
+                <input type="checkbox" class="mod-check" data-type="threads" value="${t.id}" style="width:18px;height:18px;flex-shrink:0">
+                <div class="thread-content" style="flex:1">
+                    <h4 style="margin:0"><a href="/t/${t.id}/${t.slug}" style="color:var(--text-primary)">${escapeHtml(t.title)}</a></h4>
+                </div>
+                <div class="thread-meta" style="display:flex;gap:1rem;flex-shrink:0">
+                    <span>${escapeHtml(t.category_name)}</span>
+                    <span>@${escapeHtml(t.username)}</span>
+                    <span>💬 ${t.reply_count}</span>
+                    ${t.is_pinned ? '<span title="Pinned">📌</span>' : ''}
+                    ${t.is_locked ? '<span title="Locked">🔒</span>' : ''}
+                </div>
+            </div>`).join('');
+
+        const replyRows = replies.map(r => `
+            <div class="thread-card mod-row" style="align-items:center">
+                <input type="checkbox" class="mod-check" data-type="replies" value="${r.id}" style="width:18px;height:18px;flex-shrink:0">
+                <div class="thread-content" style="flex:1">
+                    <div style="font-size:0.875rem;color:var(--text-secondary)">${escapeHtml(r.content.slice(0, 120))}${r.content.length > 120 ? '…' : ''}</div>
+                    <div class="thread-meta"><a href="/t/${r.thread_id}">in: ${escapeHtml(r.thread_title)}</a></div>
+                </div>
+                <div class="thread-meta" style="flex-shrink:0"><span>@${escapeHtml(r.username)}</span><span>${timeAgo(r.created_at)}</span></div>
+            </div>`).join('');
+
+        const body = `
+        <div class="container" style="padding-top:2rem;max-width:1100px">
+            <div class="thread-header"><h1>Moderation</h1><div class="thread-info"><span>Select items, then choose an action. Bulk merge folds every selected thread into the lowest selected thread ID.</span></div></div>
+            <div class="mod-toolbar" style="display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;padding:1rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:1.5rem">
+                <button class="btn btn-ghost" onclick="bulk('pin')">📌 Pin</button>
+                <button class="btn btn-ghost" onclick="bulk('unpin')">Unpin</button>
+                <button class="btn btn-ghost" onclick="bulk('lock')">🔒 Lock</button>
+                <button class="btn btn-ghost" onclick="bulk('unlock')">Unlock</button>
+                <select id="moveCat" class="form-input" style="width:auto">${catOptions}</select>
+                <button class="btn btn-ghost" onclick="bulk('move')">📦 Move</button>
+                <button class="btn btn-ghost" onclick="bulk('merge')">🔗 Merge into first</button>
+                <button class="btn btn-danger" onclick="bulk('delete')">🗑 Delete</button>
+                <span style="margin-left:auto;color:var(--text-muted);font-size:0.8rem" id="modStatus"></span>
+            </div>
+            <div style="display:flex;gap:0.75rem;margin-bottom:1rem">
+                <button class="btn btn-ghost" id="tabThreads" onclick="showTab('threads')" style="font-weight:700">Threads</button>
+                <button class="btn btn-ghost" id="tabReplies" onclick="showTab('replies')">Replies</button>
+            </div>
+            <div id="sectionThreads" class="thread-list">${threadRows || '<div class="empty-state">No threads</div>'}</div>
+            <div id="sectionReplies" class="thread-list" style="display:none">${replyRows || '<div class="empty-state">No replies</div>'}</div>
+        </div>
+        <script>
+        function showTab(which) {
+            document.getElementById('sectionThreads').style.display = which === 'threads' ? '' : 'none';
+            document.getElementById('sectionReplies').style.display = which === 'replies' ? '' : 'none';
+            document.getElementById('tabThreads').style.fontWeight = which === 'threads' ? '700' : '400';
+            document.getElementById('tabReplies').style.fontWeight = which === 'replies' ? '700' : '400';
+        }
+        function selected(type) {
+            return [...document.querySelectorAll('.mod-check:checked')].filter(c => c.dataset.type === type).map(c => c.value);
+        }
+        async function bulk(action) {
+            const threads = selected('threads');
+            const replies = selected('replies');
+            if (action === 'delete' && !confirm('Permanently delete the selected items? This cannot be undone.')) return;
+            const status = document.getElementById('modStatus');
+            const jobs = [];
+            if (threads.length) jobs.push({ type: 'threads', ids: threads, action, category_id: document.getElementById('moveCat').value });
+            if (replies.length) jobs.push({ type: 'replies', ids: replies, action });
+            if (!jobs.length) { status.textContent = 'Nothing selected'; return; }
+            try {
+                for (const job of jobs) {
+                    const r = await fetch('/api/mod/bulk', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(job) });
+                    const d = await r.json();
+                    if (!d.success) { status.textContent = d.error || 'Action failed'; return; }
+                }
+                status.textContent = 'Done — reloading…';
+                location.reload();
+            } catch { status.textContent = 'Action failed'; }
+        }
+        </script>`;
+
+    res.header('Content-Type', 'text/html');
+    res.send(page('Moderation', body, req.user));
+} catch (error) {
+    console.error('Moderation error:', error);
+    res.status(500).send('Server Error');
+}
 });
 
 // Admin panel (basic)
