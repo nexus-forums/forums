@@ -1,7 +1,18 @@
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { pool } = require('../config/db');
 
-const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key';
+// JWT secret: fail fast in production, ephemeral random secret in development
+// (a known default like 'your-secret-key' would let anyone forge valid tokens)
+let JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+    if (process.env.NODE_ENV === 'production') {
+        console.error('FATAL: JWT_SECRET environment variable is required in production');
+        process.exit(1);
+    }
+    JWT_SECRET = crypto.randomBytes(48).toString('hex');
+    console.warn('WARN: JWT_SECRET not set — using random ephemeral secret (sessions invalidate on restart)');
+}
 
 async function authenticate(req, res, next) {
     try {

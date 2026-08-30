@@ -8,8 +8,35 @@ const router = new HyperExpress.Router();
 
 const BCRYPT_ROUNDS = parseInt(process.env.BCRYPT_ROUNDS) || 12;
 
+// Simple in-memory sliding-window rate limiter for auth endpoints (per IP)
+const rateBuckets = new Map(); // ip -> { count, windowStart }
+setInterval(() => {
+    const cutoff = Date.now() - 15 * 60 * 1000;
+    for (const [ip, b] of rateBuckets) if (b.windowStart < cutoff) rateBuckets.delete(ip);
+}, 5 * 60 * 1000).unref();
+
+function rateLimit(max, windowMs) {
+    return (req, res, next) => {
+        const ip = req.ip || req.headers['x-forwarded-for'] || req.headers.get('x-forwarded-for') || 'unknown';
+        const now = Date.now();
+        let b = rateBuckets.get(`${req.path}:${ip}`);
+        if (!b || now - b.windowStart > windowMs) {
+            b = { count: 0, windowStart: now };
+            rateBuckets.set(`${req.path}:${ip}`, b);
+        }
+        b.count++;
+        if (b.count > max) {
+            const retryIn = Math.ceil((b.windowStart + windowMs - now) / 1000);
+            return res.status(429).json({ success: false, error: `Too many attempts. Try again in ${retryIn}s.` });
+        }
+        next();
+    };
+}
+const authLimiter = rateLimit(10, 15 * 60 * 1000);      // 10 attempts / 15 min
+const registerLimiter = rateLimit(5, 60 * 60 * 1000);   // 5 registrations / hour
+
 // Register
-router.post('/register', async (req, res) => {
+router.post('/register', registerLimiter, async (req, res) => {
     try {
         const { username, email, password, display_name } = await req.json();
 
@@ -67,7 +94,7 @@ router.post('/register', async (req, res) => {
 });
 
 // Login
-router.post('/login', async (req, res) => {
+router.post('/login', authLimiter, async (req, res) => {
     try {
         const { username_or_email, password } = await req.json();
 
@@ -210,7 +237,7 @@ router.patch('/me', requireAuth, async (req, res) => {
 });
 
 // Change password
-router.post('/password', requireAuth, async (req, res) => {
+router.post('/password', authLimiter, requireAuth, async (req, res) => {
     try {
         const { current_password, new_password } = await req.json();
         if (!current_password || !new_password) return res.status(400).json({ success: false, error: 'Both fields are required' });
