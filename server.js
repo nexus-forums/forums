@@ -57,9 +57,11 @@ app.use((req, res, next) => {
 
 // CSRF protection (double-submit cookie pattern)
 app.use((req, res, next) => {
+    req.csrfJustIssued = false;
     if (!req.cookies.csrf) {
         const token = require('crypto').randomBytes(32).toString('hex');
         req.cookies.csrf = token;
+        req.csrfJustIssued = true;
         res.header('Set-Cookie', `csrf=${token}; Path=/; SameSite=Lax`);
     }
     req.csrfToken = req.cookies.csrf;
@@ -67,9 +69,14 @@ app.use((req, res, next) => {
 });
 app.use((req, res, next) => {
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) && req.path.startsWith('/api/')) {
-        const header = req.headers['x-csrf-token'] || req.headers['X-CSRF-Token'];
-        if (!header || header !== req.cookies.csrf) {
-            return res.status(403).json({ success: false, error: 'Invalid or missing CSRF token' });
+        // First visit: the client cannot yet have the token (it's being set in
+        // this very response), so skip validation for this request only.
+        // Cross-site forgeries are still blocked by SameSite=Lax on the cookie.
+        if (!req.csrfJustIssued) {
+            const header = req.headers['x-csrf-token'] || req.headers['X-CSRF-Token'];
+            if (!header || header !== req.cookies.csrf) {
+                return res.status(403).json({ success: false, error: 'Invalid or missing CSRF token' });
+            }
         }
     }
     next();
