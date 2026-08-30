@@ -130,9 +130,10 @@ app.get('/', async (req, res) => {
         ]);
 
         const visFilter = (list) => visibleIds === null ? list : list.filter(item => visibleIds.includes(item.id));
+        const catVisFilter = (list) => visibleIds === null ? list : list.filter(item => visibleIds.includes(item.category_id));
         const visibleCategories = visFilter(categories);
-        const visibleHot = visFilter(hotThreads);
-        const visibleRecent = visFilter(recentThreads);
+        const visibleHot = catVisFilter(hotThreads);
+        const visibleRecent = catVisFilter(recentThreads);
 
         const categoryCards = visibleCategories.map(cat => `
             <a href="/c/${cat.slug}" class="card category-card">
