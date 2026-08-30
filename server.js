@@ -709,7 +709,7 @@ app.get('/tag/:id/:slug', async (req, res) => {
                 JOIN categories c ON t.category_id = c.id JOIN users u ON t.user_id = u.id
                 WHERE tt.tag_id = ? AND t.moderation_status = 'visible'${vf.sql}
                 ORDER BY t.is_pinned DESC, t.last_post_at DESC LIMIT ? OFFSET ?`, [...vf.params, tagId, limit, offset]),
-            query(`SELECT COUNT(*) as total FROM thread_tags tt JOIN threads t ON t.id = tt.thread_id WHERE tt.tag_id = ? AND t.moderation_status = ?${vf.sql.replace(/\bt\./g, '')}`, [...vf.params, tagId, 'visible'])
+            query(`SELECT COUNT(*) as total FROM thread_tags tt JOIN threads t ON t.id = tt.thread_id WHERE tt.tag_id = ? AND t.moderation_status = ?${vf.sql}`, [...vf.params, tagId, 'visible'])
         ]);
         const total = countResult[0].total;
         const pages = Math.ceil(total / limit);
